@@ -1,0 +1,33 @@
+{
+  "name": "dctlive",
+  "version": "0.1.0",
+  "description": "WebGL implementation of JPEG-like DCT with real-time controls",
+  "main": "dist/dctlive.js",
+  "module": "dist/dctlive.esm.js",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "rollup -c rollup.config.mjs",
+    "dev": "rollup -c rollup.config.mjs -w",
+    "serve": "npx serve demo"
+  },
+  "keywords": [
+    "dct",
+    "webgl",
+    "jpeg",
+    "glsl",
+    "image-processing"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^28.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "glslify": "^7.1.1",
+    "playwright": "^1.60.0",
+    "rollup": "^4.0.0",
+    "rollup-plugin-string": "^3.0.0",
+    "serve": "^14.2.6"
+  }
+}

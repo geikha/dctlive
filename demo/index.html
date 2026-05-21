@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DCTLive — Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+    }
+    h1 {
+      margin-bottom: 8px;
+      font-size: 1.4rem;
+      color: #fff;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #888;
+      margin-bottom: 20px;
+    }
+    #canvas-wrap {
+      border: 2px solid #333;
+      background: #000;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 24px;
+      max-width: 520px;
+      width: 100%;
+      background: #16213e;
+      padding: 16px 20px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+    .controls label {
+      display: flex;
+      flex-direction: column;
+      font-size: 0.8rem;
+      color: #aaa;
+    }
+    .controls label span {
+      margin-bottom: 2px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .controls label span .val {
+      color: #6cf;
+      font-family: monospace;
+    }
+    .controls input[type="range"] {
+      width: 100%;
+      accent-color: #6cf;
+    }
+    .controls input[type="checkbox"] {
+      accent-color: #6cf;
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    button {
+      background: #0f3460;
+      border: 1px solid #1a3a6a;
+      color: #e0e0e0;
+      padding: 6px 18px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    button:hover { background: #1a4a80; }
+    button.active { background: #e94560; border-color: #e94560; }
+    .full-row { grid-column: 1 / -1; }
+    #image-upload { margin-bottom: 16px; }
+    select {
+      background: #0f3460;
+      color: #e0e0e0;
+      border: 1px solid #1a3a6a;
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-size: 0.8rem;
+    }
+    .section-label {
+      grid-column: 1 / -1;
+      font-size: 0.75rem;
+      color: #6cf;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      border-top: 1px solid #2a3a5e;
+      padding-top: 8px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>DCTLive</h1>
+  <p class="subtitle">WebGL JPEG-like DCT — real-time demo</p>
+
+    <div class="btn-row">
+    <button id="btn-run">Run Once</button>
+    <button id="btn-start">Start Loop</button>
+    <button id="btn-stop">Stop</button>
+    <input type="file" id="image-upload" accept="image/*,video/*" />
+  </div>
+
+  <div id="canvas-wrap"></div>
+
+  <div class="controls">
+    <label class="full-row">
+      <span>blockSize <span class="val" id="val-blockSize">8</span></span>
+      <input type="range" id="ctrl-blockSize" min="2" max="64" step="1" value="8" />
+    </label>
+
+    <label class="full-row">
+      <span>lpf (low-pass filter) <span class="val" id="val-lpf">128</span></span>
+      <input type="range" id="ctrl-lpf" min="1" max="128" step="1" value="128" />
+    </label>
+
+    <label>
+      <span>highFreqMul <span class="val" id="val-highFreqMultiplier">0.00</span></span>
+      <input type="range" id="ctrl-highFreqMultiplier" min="-2" max="4" step="0.01" value="0" />
+    </label>
+
+    <label>
+      <span>quantizeY <span class="val" id="val-quantizeY">0.00</span></span>
+      <input type="range" id="ctrl-quantizeY" min="0" max="100" step="1" value="0" />
+    </label>
+
+    <label>
+      <span>quantizeYf <span class="val" id="val-quantizeYf">0.00</span></span>
+      <input type="range" id="ctrl-quantizeYf" min="0" max="100" step="1" value="0" />
+    </label>
+
+    <label>
+      <span>quantizeC <span class="val" id="val-quantizeC">0.00</span></span>
+      <input type="range" id="ctrl-quantizeC" min="0" max="100" step="1" value="0" />
+    </label>
+
+    <label>
+      <span>quantizeCf <span class="val" id="val-quantizeCf">0.00</span></span>
+      <input type="range" id="ctrl-quantizeCf" min="0" max="100" step="1" value="0" />
+    </label>
+
+    <label>
+      <span>quantizeA <span class="val" id="val-quantizeA">0.00</span></span>
+      <input type="range" id="ctrl-quantizeA" min="0" max="100" step="1" value="0" />
+    </label>
+
+    <label>
+      <span>quantizeAf <span class="val" id="val-quantizeAf">0.00</span></span>
+      <input type="range" id="ctrl-quantizeAf" min="0" max="100" step="1" value="0" />
+    </label>
+
+    <div class="section-label">DCT Pass Control (New API)</div>
+
+    <label>
+      <span>DCT horizontal</span>
+      <input type="checkbox" id="ctrl-dctHorizontal" checked />
+    </label>
+
+    <label>
+      <span>DCT vertical</span>
+      <input type="checkbox" id="ctrl-dctVertical" checked />
+    </label>
+
+    <label>
+      <span>RDCT horizontal</span>
+      <input type="checkbox" id="ctrl-rdctHorizontal" checked />
+    </label>
+
+    <label>
+      <span>RDCT vertical</span>
+      <input type="checkbox" id="ctrl-rdctVertical" checked />
+    </label>
+  </div>
+
+  <div class="controls">
+    <div class="section-label">Render / Display</div>
+
+    <label>
+      <span>render width</span>
+      <input type="number" id="ctrl-res-width" min="1" value="512" />
+    </label>
+
+    <label>
+      <span>render height</span>
+      <input type="number" id="ctrl-res-height" min="1" value="512" />
+    </label>
+
+    <label>
+      <span>display width</span>
+      <input type="number" id="ctrl-display-width" min="1" value="512" />
+    </label>
+
+    <label>
+      <span>display height</span>
+      <input type="number" id="ctrl-display-height" min="1" value="512" />
+    </label>
+
+    <label class="full-row">
+      <span>fps limit <span class="val" id="val-fps">0</span></span>
+      <input type="range" id="ctrl-fps" min="0" max="60" step="1" value="0" />
+    </label>
+  </div>
+
+  <div class="controls">
+    <div class="section-label">Input Source</div>
+
+    <label>
+      <span>fit mode</span>
+      <select id="ctrl-fit">
+        <option value="fit">fit</option>
+        <option value="fill">fill</option>
+        <option value="stretch" selected>stretch</option>
+      </select>
+    </label>
+
+    <label>
+      <span>mag filter</span>
+      <select id="ctrl-magFilter">
+        <option value="linear" selected>linear</option>
+        <option value="nearest">nearest</option>
+      </select>
+    </label>
+
+    <label>
+      <span>min filter</span>
+      <select id="ctrl-minFilter">
+        <option value="linear" selected>linear</option>
+        <option value="nearest">nearest</option>
+      </select>
+    </label>
+
+    <label>
+      <span>wrap mode</span>
+      <select id="ctrl-wrap">
+        <option value="clamp" selected>clamp</option>
+        <option value="repeat">repeat</option>
+        <option value="mirror">mirror</option>
+      </select>
+    </label>
+  </div>
+
+  <script src="../dist/dctlive.js"></script>
+  <script>
+    // --- Init ---
+    const dct = new DCTLive({ width: 512, height: 512 });
+    document.getElementById('canvas-wrap').appendChild(dct.canvas);
+
+    // --- Default image (placeholder — replace with your test image) ---
+    const DEFAULT_IMG = 'test.png';
+    dct.initImage(DEFAULT_IMG, { fit: 'stretch' }).catch(() => {
+      console.warn('Default test.png not found — use the file picker to load an image.');
+    });
+
+    // --- Buttons ---
+    document.getElementById('btn-run').addEventListener('click', () => dct.run());
+    document.getElementById('btn-start').addEventListener('click', () => {
+      dct.start();
+      document.getElementById('btn-start').classList.add('active');
+      document.getElementById('btn-stop').classList.remove('active');
+    });
+    document.getElementById('btn-stop').addEventListener('click', () => {
+      dct.stop();
+      document.getElementById('btn-stop').classList.add('active');
+      document.getElementById('btn-start').classList.remove('active');
+    });
+
+    // --- File upload (images or video) ---
+    document.getElementById('image-upload').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+
+      if (file.type && file.type.startsWith('video/')) {
+        dct.initVideo(url, { fit: dct.input.fit });
+      } else {
+        dct.initImage(url, { fit: dct.input.fit });
+      }
+    });
+
+    // --- Range sliders ---
+    const INT_UNIFORMS = ['blockSize', 'lpf'];
+    const RANGE_UNIFORMS = [
+      'blockSize', 'lpf', 'highFreqMultiplier',
+      'quantizeY', 'quantizeYf',
+      'quantizeC', 'quantizeCf',
+      'quantizeA', 'quantizeAf',
+    ];
+
+    RANGE_UNIFORMS.forEach((name) => {
+      const input = document.getElementById('ctrl-' + name);
+      const valSpan = document.getElementById('val-' + name);
+      if (!input) return;
+      input.addEventListener('input', () => {
+        const isInt = INT_UNIFORMS.includes(name);
+        const v = isInt ? parseInt(input.value) : parseFloat(input.value);
+        dct.setUniform(name, v);
+        valSpan.textContent = isInt ? v : v.toFixed(3);
+        if (!dct._looping) dct.run();
+      });
+    });
+
+    // --- New pass control checkboxes ---
+    const updatePassControls = () => {
+      const dctH = document.getElementById('ctrl-dctHorizontal').checked;
+      const dctV = document.getElementById('ctrl-dctVertical').checked;
+      const rdctH = document.getElementById('ctrl-rdctHorizontal').checked;
+      const rdctV = document.getElementById('ctrl-rdctVertical').checked;
+      dct.setDCT(dctH, dctV);
+      dct.setRDCT(rdctH, rdctV);
+      if (!dct._looping) dct.run();
+    };
+
+    ['ctrl-dctHorizontal', 'ctrl-dctVertical', 'ctrl-rdctHorizontal', 'ctrl-rdctVertical'].forEach((id) => {
+      document.getElementById(id).addEventListener('change', updatePassControls);
+    });
+
+    // --- Render/display controls ---
+    document.getElementById('ctrl-res-width').addEventListener('change', () => {
+      const w = parseInt(document.getElementById('ctrl-res-width').value, 10);
+      const h = parseInt(document.getElementById('ctrl-res-height').value, 10);
+      dct.setResolution(w, h);
+    });
+
+    document.getElementById('ctrl-res-height').addEventListener('change', () => {
+      const w = parseInt(document.getElementById('ctrl-res-width').value, 10);
+      const h = parseInt(document.getElementById('ctrl-res-height').value, 10);
+      dct.setResolution(w, h);
+    });
+
+    document.getElementById('ctrl-display-width').addEventListener('change', (e) => {
+      dct.setDisplaySize(parseInt(e.target.value, 10), document.getElementById('ctrl-display-height').value);
+    });
+    document.getElementById('ctrl-display-height').addEventListener('change', (e) => {
+      dct.setDisplaySize(document.getElementById('ctrl-display-width').value, parseInt(e.target.value, 10));
+    });
+
+    document.getElementById('ctrl-fps').addEventListener('input', (e) => {
+      const fps = parseInt(e.target.value, 10);
+      dct.setFPS(fps);
+      document.getElementById('val-fps').textContent = fps;
+    });
+
+    // --- Input source controls ---
+    document.getElementById('ctrl-fit').addEventListener('change', (e) => {
+      dct.input.fit = e.target.value;
+      if (!dct._looping) dct.run();
+    });
+    document.getElementById('ctrl-magFilter').addEventListener('change', (e) => {
+      dct.input.magFilter = e.target.value;
+      if (!dct._looping) dct.run();
+    });
+    document.getElementById('ctrl-minFilter').addEventListener('change', (e) => {
+      dct.input.minFilter = e.target.value;
+      if (!dct._looping) dct.run();
+    });
+    document.getElementById('ctrl-wrap').addEventListener('change', (e) => {
+      dct.input.wrap = e.target.value;
+      if (!dct._looping) dct.run();
+    });
+  </script>
+</body>
+</html>
