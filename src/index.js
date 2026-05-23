@@ -29,7 +29,7 @@ export default class DCTLive {
    * @param {Object} opts
    * @param {number}  [opts.width=256]  - Canvas / processing width
    * @param {number}  [opts.height=256] - Canvas / processing height
-   * @param {boolean} [opts.loop=false] - Continuously re-run the pipeline
+   * @param {boolean} [opts.loop=true]  - Continuously re-run the pipeline (default: true)
    * @param {HTMLCanvasElement} [opts.canvas] - Optional existing canvas
    */
   constructor(opts = {}) {
@@ -75,10 +75,8 @@ export default class DCTLive {
     // Define shorthand uniform properties
     this._defineShorthandProperties();
 
-    // Auto-start loop if requested
-    if (opts.loop) {
-      this._autoLoop = true;
-    }
+    // Auto-start loop when an input source is ready (default: true)
+    this._autoLoop = opts.loop !== false;
   }
 
   _defineShorthandProperties() {
@@ -139,15 +137,20 @@ export default class DCTLive {
    * @param {Object} [opts] - { fit, minFilter, magFilter, wrapS, wrapT, wrap }
    * @returns {Promise<void>}
    */
-  initImage(source, opts = {}) {
-    const promise = typeof source === 'string'
-      ? this.input.loadImage(source, opts)
-      : Promise.resolve(this.input.setImage(source, opts));
-
-    return promise.then(() => {
+  async initImage(source, opts = {}) {
+    try {
+      if (typeof source === 'string') {
+        await this.input.loadImage(source, opts);
+      } else if (source instanceof HTMLImageElement) {
+        this.input.setImage(source, opts);
+      } else {
+        throw new Error('DCTLive.initImage: source must be a URL string or HTMLImageElement');
+      }
       this.run();
       if (this._autoLoop) this.start();
-    });
+    } catch (err) {
+      console.error('DCTLive.initImage failed:', err);
+    }
   }
 
   /**
@@ -156,40 +159,44 @@ export default class DCTLive {
    * @param {Object} [opts] - { fit, minFilter, magFilter, wrapS, wrapT, wrap }
    * @returns {Promise<void>}
    */
-  initVideo(source, opts = {}) {
-    if (typeof source === 'string') {
-      return new Promise((resolve, reject) => {
-        const video = document.createElement('video');
-        video.src = source;
-        video.crossOrigin = 'anonymous';
-        video.muted = true;
-        video.loop = true;
-        video.playsInline = true;
+  async initVideo(source, opts = {}) {
+    try {
+      if (typeof source === 'string') {
+        await new Promise((resolve, reject) => {
+          const video = document.createElement('video');
+          video.src = source;
+          video.crossOrigin = 'anonymous';
+          video.muted = true;
+          video.loop = true;
+          video.playsInline = true;
 
-        const onLoaded = () => {
-          video.removeEventListener('loadeddata', onLoaded);
-          video.removeEventListener('error', onError);
-          this.input.setVideo(video, opts);
-          this.run();
-          if (this._autoLoop) this.start();
-          video.play().catch(() => {});
-          resolve();
-        };
+          const cleanup = () => {
+            video.removeEventListener('loadeddata', onLoaded);
+            video.removeEventListener('error', onError);
+          };
+          const onLoaded = () => {
+            cleanup();
+            this.input.setVideo(video, opts);
+            video.play().catch(() => {});
+            resolve();
+          };
+          const onError = (e) => {
+            cleanup();
+            reject(new Error(`DCTLive.initVideo: failed to load "${source}" — ${e.message || 'unknown error'}`));
+          };
 
-        const onError = () => {
-          video.removeEventListener('loadeddata', onLoaded);
-          video.removeEventListener('error', onError);
-          reject(new Error('Failed to load video: ' + source));
-        };
-
-        video.addEventListener('loadeddata', onLoaded);
-        video.addEventListener('error', onError);
-      });
-    } else {
-      this.input.setVideo(source, opts);
+          video.addEventListener('loadeddata', onLoaded);
+          video.addEventListener('error', onError);
+        });
+      } else if (source instanceof HTMLVideoElement) {
+        this.input.setVideo(source, opts);
+      } else {
+        throw new Error('DCTLive.initVideo: source must be a URL string or HTMLVideoElement');
+      }
       this.run();
       if (this._autoLoop) this.start();
-      return Promise.resolve();
+    } catch (err) {
+      console.error('DCTLive.initVideo failed:', err);
     }
   }
 
@@ -199,34 +206,38 @@ export default class DCTLive {
    * @param {HTMLCanvasElement|CanvasRenderingContext2D|Object} canvas
    * @param {Object} [opts]
    */
-  initCanvas(canvas, opts = {}) {
-    let targetCanvas = canvas;
+  async initCanvas(canvas, opts = {}) {
+    try {
+      let targetCanvas = canvas;
 
-    if (canvas && typeof canvas === 'object') {
-      if (canvas instanceof HTMLCanvasElement) {
-        targetCanvas = canvas;
-      } else if (canvas instanceof CanvasRenderingContext2D) {
-        targetCanvas = canvas.canvas;
-      } else if (canvas.src instanceof HTMLCanvasElement) {
-        targetCanvas = canvas.src;
-      } else if (canvas.src instanceof CanvasRenderingContext2D) {
-        targetCanvas = canvas.src.canvas;
-      } else if (canvas.canvas instanceof HTMLCanvasElement) {
-        targetCanvas = canvas.canvas;
-      } else if (canvas.canvas instanceof CanvasRenderingContext2D) {
-        targetCanvas = canvas.canvas.canvas;
-      } else if (typeof canvas.getContext === 'function') {
-        targetCanvas = canvas;
+      if (canvas && typeof canvas === 'object') {
+        if (canvas instanceof HTMLCanvasElement) {
+          targetCanvas = canvas;
+        } else if (canvas instanceof CanvasRenderingContext2D) {
+          targetCanvas = canvas.canvas;
+        } else if (canvas.src instanceof HTMLCanvasElement) {
+          targetCanvas = canvas.src;
+        } else if (canvas.src instanceof CanvasRenderingContext2D) {
+          targetCanvas = canvas.src.canvas;
+        } else if (canvas.canvas instanceof HTMLCanvasElement) {
+          targetCanvas = canvas.canvas;
+        } else if (canvas.canvas instanceof CanvasRenderingContext2D) {
+          targetCanvas = canvas.canvas.canvas;
+        } else if (typeof canvas.getContext === 'function') {
+          targetCanvas = canvas;
+        }
       }
-    }
 
-    if (!(targetCanvas instanceof HTMLCanvasElement)) {
-      throw new Error('DCTLive.initCanvas requires an HTMLCanvasElement, CanvasRenderingContext2D, or wrapper object with a canvas source');
-    }
+      if (!(targetCanvas instanceof HTMLCanvasElement)) {
+        throw new Error('DCTLive.initCanvas: expected an HTMLCanvasElement, CanvasRenderingContext2D, or wrapper object with a canvas source');
+      }
 
-    this.input.setCanvas(targetCanvas, opts);
-    this.run();
-    if (this._autoLoop) this.start();
+      this.input.setCanvas(targetCanvas, opts);
+      this.run();
+      if (this._autoLoop) this.start();
+    } catch (err) {
+      console.error('DCTLive.initCanvas failed:', err);
+    }
   }
 
   // ---- Uniform setters ----
@@ -275,20 +286,12 @@ export default class DCTLive {
   }
 
   /**
-   * Set the canvas display size using CSS.
-   * @param {number|string} width
-   * @param {number|string} height
+   * Resize the canvas display area using CSS (does not affect WebGL resolution).
+   * @param {number|string} width  - CSS width (number treated as px, or any CSS string)
+   * @param {number|string} height - CSS height
    */
-  setDisplaySize(width, height) {
+  resizeCanvas(width, height) {
     this._display.setSize(width, height);
-  }
-
-  /**
-   * Set the maximum frames per second for looped rendering.
-   * @param {number} fps
-   */
-  setFPS(fps) {
-    this._config.setFPS(fps);
   }
 
   /**
@@ -342,11 +345,20 @@ export default class DCTLive {
     this._lastFrameTime = null;
     const loop = (timestamp) => {
       if (!this._looping) return;
-      const delta = this._lastFrameTime === null ? Infinity : timestamp - this._lastFrameTime;
       const frameInterval = this._config.frameInterval;
-      if (frameInterval <= 0 || delta >= frameInterval) {
+      if (this._lastFrameTime === null) {
+        // First tick: always render, anchor the clock cleanly
         this.run();
-        this._lastFrameTime = timestamp - (frameInterval > 0 ? (delta % frameInterval) : 0);
+        this._lastFrameTime = timestamp;
+      } else {
+        const delta = timestamp - this._lastFrameTime;
+        if (frameInterval <= 0 || delta >= frameInterval) {
+          this.run();
+          // Drift-correct: carry over any excess time so frame rate stays accurate
+          this._lastFrameTime = frameInterval > 0
+            ? timestamp - (delta % frameInterval)
+            : timestamp;
+        }
       }
       this._rafId = requestAnimationFrame(loop);
     };
