@@ -341,10 +341,14 @@
     });
 
     document.getElementById('ctrl-display-width').addEventListener('change', (e) => {
-      dct.setDisplaySize(parseInt(e.target.value, 10), document.getElementById('ctrl-display-height').value);
+      const w = parseInt(e.target.value, 10);
+      const h = parseInt(document.getElementById('ctrl-display-height').value, 10);
+      dct.resizeCanvas(w, h);
     });
     document.getElementById('ctrl-display-height').addEventListener('change', (e) => {
-      dct.setDisplaySize(document.getElementById('ctrl-display-width').value, parseInt(e.target.value, 10));
+      const w = parseInt(document.getElementById('ctrl-display-width').value, 10);
+      const h = parseInt(e.target.value, 10);
+      dct.resizeCanvas(w, h);
     });
 
     document.getElementById('ctrl-fps').addEventListener('input', (e) => {
