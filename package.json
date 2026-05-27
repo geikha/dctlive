@@ -4,6 +4,12 @@
   "description": "WebGL implementation of JPEG-like DCT with real-time controls",
   "main": "dist/dctlive.js",
   "module": "dist/dctlive.esm.js",
+  "exports": {
+    ".": {
+      "import": "./dist/dctlive.esm.js",
+      "require": "./dist/dctlive.js"
+    }
+  },
   "files": [
     "dist",
     "src"
