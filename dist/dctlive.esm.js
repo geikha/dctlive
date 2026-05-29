@@ -688,11 +688,12 @@ const DEFAULT_UNIFORMS = {
   yOnly: false,
 };
 
+const QUANTIZE_PROPS = new Set(['quantizeY', 'quantizeYf', 'quantizeC', 'quantizeCf', 'quantizeA', 'quantizeAf']);
+
 function normalizeQuantize(name, value) {
-  if (/^quantize/.test(name) && typeof value === 'number') {
-    if (value >= 1) {
-      return Math.min(Math.max(value, 0), 100) / 100;
-    }
+  if (QUANTIZE_PROPS.has(name) && typeof value === 'number') {
+    const t = Math.min(Math.max(value, 0), 1);
+    return t * t;
   }
   return value;
 }

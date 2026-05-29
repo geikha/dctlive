@@ -397,33 +397,33 @@
       </div>
       <div class="ctrl-row">
         <span class="lbl">qY</span>
-        <input type="range" id="ctrl-qY" min="0" max="100" step="1" value="0" />
-        <span class="val" id="val-qY">0</span>
+        <input type="range" id="ctrl-qY" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="val-qY">0.00</span>
       </div>
       <div class="ctrl-row">
         <span class="lbl">qYf</span>
-        <input type="range" id="ctrl-qYf" min="0" max="100" step="1" value="0" />
-        <span class="val" id="val-qYf">0</span>
+        <input type="range" id="ctrl-qYf" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="val-qYf">0.00</span>
       </div>
       <div class="ctrl-row">
         <span class="lbl">qC</span>
-        <input type="range" id="ctrl-qC" min="0" max="100" step="1" value="0" />
-        <span class="val" id="val-qC">0</span>
+        <input type="range" id="ctrl-qC" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="val-qC">0.00</span>
       </div>
       <div class="ctrl-row">
         <span class="lbl">qCf</span>
-        <input type="range" id="ctrl-qCf" min="0" max="100" step="1" value="0" />
-        <span class="val" id="val-qCf">0</span>
+        <input type="range" id="ctrl-qCf" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="val-qCf">0.00</span>
       </div>
       <div class="ctrl-row">
         <span class="lbl">qA</span>
-        <input type="range" id="ctrl-qA" min="0" max="100" step="1" value="0" />
-        <span class="val" id="val-qA">0</span>
+        <input type="range" id="ctrl-qA" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="val-qA">0.00</span>
       </div>
       <div class="ctrl-row">
         <span class="lbl">qAf</span>
-        <input type="range" id="ctrl-qAf" min="0" max="100" step="1" value="0" />
-        <span class="val" id="val-qAf">0</span>
+        <input type="range" id="ctrl-qAf" min="0" max="1" step="0.01" value="0" />
+        <span class="val" id="val-qAf">0.00</span>
       </div>
     </div>
 
@@ -634,9 +634,9 @@
 
     QUANT_CTRLS.forEach(({ id, uniform, val }) => {
       document.getElementById(id).addEventListener('input', (e) => {
-        const v = parseInt(e.target.value, 10);
+        const v = parseFloat(e.target.value);
         dct.setUniform(uniform, v);
-        document.getElementById(val).textContent = v;
+        document.getElementById(val).textContent = v.toFixed(2);
         if (!dct._looping) dct.run();
       });
     });

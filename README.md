@@ -57,9 +57,9 @@ dct.blockSize = 16;
 // Manipulate higher harmonics
 dct.hfreq = 2.0;   // Sharpen-like behaviour
 
-// Quantization (lose color/luminance like JPEG)
-dct.qY = 50;   // Reduce luminance
-dct.qC = 80;   // Reduce color
+// Quantization (lose color/luminance like JPEG, 0–1 range with power curve)
+dct.qY = 0.5;  // Reduce luminance
+dct.qC = 0.8;  // Reduce color
 dct.yOnly = true;  // Drop all color
 
 // Ignore harmonics
@@ -144,12 +144,12 @@ new DCTLive({
 
 ### Properties (Shorthand)
 ```js
-dct.blockSize           // 2–64 (default 8)
-dct.lpf                 // 0–128 (default 128, no blur)
+dct.blockSize           // 2–64 recommended (default 8)
+dct.lpf                 // 0–128 (default 128)
 dct.hfreq               // High frequency multiplier
-dct.qY, dct.qC          // Luminance, chrominance quantization (0–100)
-dct.qYf, dct.qCf        // Frequency-dependent quantization
-dct.qA, dct.qAf         // Alpha quantization
+dct.qY, dct.qC          // Luminance, chrominance quantization (0–1, power curve)
+dct.qYf, dct.qCf        // Frequency-dependent quantization (0–1)
+dct.qA, dct.qAf         // Alpha quantization (0–1)
 dct.yOnly               // Drop color channels (bool)
 
 dct.input.fit           // 'fit' | 'fill' | 'stretch'
@@ -171,7 +171,7 @@ await dct.initImage('image.png');
 // Slider to control compression
 document.querySelector('input[type=range]').addEventListener('input', (e) => {
   dct.blockSize = e.target.value;
-  dct.qY = e.target.value * 2;
+  dct.qY = e.target.value * 0.5;
 });
 
 dct.start();
@@ -192,7 +192,7 @@ dct.run();
 
 // Posterize (reduce color, keep luminance)
 dct.yOnly = true;
-dct.qC = 100;
+dct.qC = 1.0;
 dct.run();
 ```
 
