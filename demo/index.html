@@ -79,6 +79,129 @@
         border-left: none;
         border-top: 1px solid var(--border);
       }
+
+      /* Mobile: larger text and buttons */
+      .section-label {
+        font-size: 11px;
+        margin-bottom: 10px;
+        margin-top: 0;
+      }
+
+      button {
+        font-size: 14px;
+        padding: 6px 12px;
+        min-height: 40px;
+      }
+
+      #source-input {
+        font-size: 14px;
+        padding: 5px 6px;
+        min-height: 40px;
+      }
+
+      #canvas-area {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 10;
+        width: 100%;
+        height: auto;
+      }
+
+      #panel {
+        margin-top: var(--canvas-display-height, 320px);
+      }
+
+      .section {
+        padding: 12px;
+        margin-bottom: 0;
+      }
+
+      .section-label {
+        margin-bottom: 14px;
+      }
+
+      .ctrl-row {
+        gap: 8px;
+        margin-bottom: 14px;
+      }
+
+      .ctrl-row:has(input[type="range"]) {
+        margin-bottom: 28px;
+      }
+
+      .ctrl-row:has(input[type="range"]):last-child {
+        margin-bottom: 28px;
+      }
+
+      .ctrl-row:last-child {
+        margin-bottom: 0;
+      }
+
+      .ctrl-row .val {
+        font-size: 13px;
+      }
+
+      .row {
+        gap: 8px;
+        margin-bottom: 14px;
+      }
+
+      .row:last-child {
+        margin-bottom: 0;
+      }
+
+      .dual-row {
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .dual-row:last-child {
+        margin-bottom: 0;
+      }
+
+      .check-row {
+        gap: 10px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+      }
+
+      .check-row:last-child {
+        margin-bottom: 0;
+      }
+
+      .ctrl-row.first-slider {
+        margin-top: 28px;
+      }
+
+      .check-row label {
+        font-size: 14px;
+        padding: 6px 12px;
+        min-height: 40px;
+        flex: 1;
+      }
+
+      select {
+        font-size: 14px;
+        padding: 6px 8px;
+        min-height: 40px;
+        flex: 1;
+      }
+
+      input[type="number"] {
+        font-size: 14px;
+        padding: 6px 8px;
+        min-height: 40px;
+        width: 70px;
+      }
+
+      #wave-input {
+        font-size: 13px;
+        padding: 8px 10px;
+        min-height: 70px;
+        margin-bottom: 14px;
+      }
     }
 
     /* ---- panel header ---- */
@@ -266,18 +389,38 @@
     .check-row:last-child { margin-bottom: 0; }
 
     .check-row label {
+      font-family: inherit;
+      font-size: 11px;
+      background: var(--bg-2);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 3px 8px;
+      cursor: pointer;
+      outline: none;
+      letter-spacing: 0.3px;
       display: flex;
       align-items: center;
-      gap: 5px;
-      color: var(--fg-dim);
-      font-size: 11px;
-      cursor: pointer;
+      justify-content: center;
+      gap: 0;
+      user-select: none;
+    }
+
+    .check-row label:hover {
+      border-color: var(--fg-dim);
+    }
+
+    .check-row label:active {
+      background: var(--bg-3);
     }
 
     input[type="checkbox"] {
-      accent-color: var(--accent);
-      width: 12px; height: 12px;
-      cursor: pointer;
+      display: none;
+    }
+
+    .check-row label:has(input[type="checkbox"]:checked) {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: var(--bg-3);
     }
 
     /* ---- select ---- */
@@ -370,15 +513,17 @@
     <!-- RENDER -->
     <div class="section">
       <div class="section-label">render</div>
-      <div class="ctrl-row">
-        <span class="lbl">w</span>
-        <input type="number" id="ctrl-width" value="512" min="1" />
+      <div class="row">
+        <div class="ctrl-row" style="flex: 1;">
+          <span class="lbl">w</span>
+          <input type="number" id="ctrl-width" value="512" min="1" style="flex: 1; min-width: 0;" />
+        </div>
+        <div class="ctrl-row" style="flex: 1;">
+          <span class="lbl">h</span>
+          <input type="number" id="ctrl-height" value="512" min="1" style="flex: 1; min-width: 0;" />
+        </div>
       </div>
-      <div class="ctrl-row">
-        <span class="lbl">h</span>
-        <input type="number" id="ctrl-height" value="512" min="1" />
-      </div>
-      <div class="ctrl-row">
+      <div class="ctrl-row first-slider">
         <span class="lbl">fps</span>
         <input type="range" id="ctrl-fps" min="0" max="60" step="1" value="0" />
         <span class="val" id="val-fps">∞</span>
@@ -401,7 +546,7 @@
     <!-- TRANSFORMS -->
     <div class="section">
       <div class="section-label">transforms</div>
-      <div class="ctrl-row">
+      <div class="ctrl-row first-slider">
         <span class="lbl">block</span>
         <input type="range" id="ctrl-blockSize" min="2" max="64" step="1" value="8" />
         <span class="val" id="val-blockSize">8</span>
@@ -424,7 +569,7 @@
       <div class="check-row">
         <label><input type="checkbox" id="ctrl-yOnly" /> y only</label>
       </div>
-      <div class="ctrl-row">
+      <div class="ctrl-row first-slider">
         <span class="lbl">qY</span>
         <input type="range" id="ctrl-qY" min="0" max="1" step="0.01" value="0" />
         <span class="val" id="val-qY">0.00</span>
@@ -530,6 +675,11 @@
     document.getElementById('canvas-area').appendChild(dct.canvas);
     dct.resizeCanvas(initW, initH);
 
+    // Update panel margin to account for fixed canvas height on mobile
+    if (isMobile()) {
+      document.documentElement.style.setProperty('--canvas-display-height', initH + 'px');
+    }
+
     // Show warning if 8-bit precision is detected
     const warningEl = document.getElementById('precision-warning');
     if (dct.precision === '8bit') {
@@ -553,6 +703,9 @@
     function refreshCanvasSize() {
       const { w, h } = calcDisplaySize(dct.width, dct.height);
       dct.resizeCanvas(w, h);
+      if (isMobile()) {
+        document.documentElement.style.setProperty('--canvas-display-height', (h + 8) + 'px');
+      }
     }
 
     window.addEventListener('resize', refreshCanvasSize);
