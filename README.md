@@ -2,7 +2,7 @@
 
 WebGL implementation of DCT (Discrete Cosine Transform) and IDCT with real-time controls. Compress, glitch, and manipulate images and video using JPEG-like algorithms.
 
-![](./assets/DCT-DEMO-IMG.jpg)
+![](./demo/DCT-DEMO-IMG.jpg)
 
 Design and API by geikha. DCT shader originally from [FMS-Cat](https://twitter.com/FMS_Cat) ([Testing DCT quantization shader](https://www.youtube.com/watch?v=xt4UFRPqX_w)). Thanks to [sol sarratea](https://solsarratea.world/) for the references. Implementation and documentation done using Claude Code.
 
