@@ -1,180 +1,216 @@
-# dctlive
+# DCTLive
 
-WebGL implementation of JPEG-like DCT (Discrete Cosine Transform) with real-time controls.
+WebGL implementation of DCT (Discrete Cosine Transform) and IDCT with real-time controls. Compress, glitch, and manipulate images and video using JPEG-like algorithms.
 
-## Usage
+![](./assets/DCT-DEMO-IMG.jpg)
 
+Design and API by geikha. DCT shader originally from [FMS-Cat](https://twitter.com/FMS_Cat) ([Testing DCT quantization shader](https://www.youtube.com/watch?v=xt4UFRPqX_w)). Thanks to [sol sarratea](https://solsarratea.world/) for the references. Implementation and documentation done using Claude Code.
+
+## Install
+
+```bash
+npm install dctlive
+```
+
+Or use from CDN:
+```html
+<script src="https://unpkg.com/dctlive/dist/dctlive.js"></script>
+```
+
+## Quick Start
+
+### Minimal Setup
 ```js
-import DCTLive from 'dctlive';
-
 const dct = new DCTLive({ width: 512, height: 512 });
-
-await dct.initImage('path/to/image.png');
-dct.show();
+document.body.appendChild(dct.canvas);
+await dct.initImage('image.png');
 dct.start();
 ```
 
-## API
-
-### `new DCTLive(options)`
-
-| Option   | Type    | Default | Description                          |
-|----------|---------|---------|--------------------------------------|
-| `width`  | number  | 256     | Canvas width                         |
-| `height` | number  | 256     | Canvas height                        |
-| `loop`   | boolean | **true**| Auto-run shader each frame           |
-| `canvas` | HTMLCanvasElement | auto | Provide your own canvas element |
-
-### Methods
-
-#### Input & Rendering
-- **`initImage(url, opts)`** — Load an image URL or HTMLImageElement. Options: `{ fit, minFilter, magFilter, wrap }`. Returns a Promise.
-- **`initVideo(video, opts)`** — Load a video URL or HTMLVideoElement as dynamic input. Same options. Returns a Promise.
-- **`initCanvas(canvas, opts)`** — Use another canvas as input. Accepts HTMLCanvasElement, CanvasRenderingContext2D, or Hydra-style wrappers. Returns a Promise.
-- **`run()`** — Execute the DCT/IDCT pipeline once.
-- **`start()`** — Begin the render loop.
-- **`stop()`** — Stop the render loop.
-
-#### Display
-- **`show()`** — Make the canvas visible.
-- **`hide()`** — Hide the canvas.
-- **`mount(parent)`** — Append the canvas to a DOM element (default: `document.body`).
-- **`unmount()`** — Remove the canvas from the DOM.
-
-#### Pass Control
-- **`setDCT(horizontal, vertical)`** — Control which forward DCT passes run. `vertical` defaults to `horizontal` if not specified.
-- **`setRDCT(horizontal, vertical)`** — Control which inverse DCT passes run. `vertical` defaults to `horizontal` if not specified.
-
-**Note:** When all passes are disabled, the input texture is copied directly to the output canvas without any shader transforms (via passthrough).
-
-#### Configuration
-- **`setUniform(name, value)`** — Set a shader uniform by name.
-- **`setUniforms(obj)`** — Batch-set multiple uniforms.
-- **`setWaveFunction(glslBody)`** — Replace the wave function in the inverse DCT shader.
-- **`setResolution(width, height)`** — Change the WebGL processing resolution (does not affect CSS display size).
-- **`resizeCanvas(width, height)`** — Change the canvas CSS display size only (number treated as `px`, or any CSS string).
-
-#### FPS / Frame Rate
-Control frame rate via the `fps` getter/setter:
+### Load Sources
 ```js
-dct.fps = 30;   // limit to 30 fps
-dct.fps = 0;    // unlimited (default)
-console.log(dct.fps); // read current value
+// Image from URL
+await dct.initImage('https://example.com/image.jpg');
+
+// Video from URL
+await dct.initVideo('https://example.com/video.mp4');
+
+// From file input
+fileInput.addEventListener('change', async (e) => {
+  const url = URL.createObjectURL(e.target.files[0]);
+  await dct.initImage(url);
+});
+
+// From camera
+await dct.initCam(0);  // First camera
+await dct.initCam('Built-in Camera');  // Or by label
 ```
 
-### Uniforms
+## Common Parameters
 
-Uniforms can be set via `setUniform` / `setUniforms`, or directly as shorthand properties on the instance:
+All parameters update in real-time:
 
 ```js
+// Block size (larger = more blocky compression)
 dct.blockSize = 16;
+
+// Manipulate higher harmonics
+dct.hfreq = 2.0;   // Sharpen-like behaviour
+
+// Quantization (lose color/luminance like JPEG)
+dct.qY = 50;   // Reduce luminance
+dct.qC = 80;   // Reduce color
+dct.yOnly = true;  // Drop all color
+
+// Ignore harmonics
 dct.lpf = 64;
-dct.qY = 0.5;          // shorthand for quantizeY
-dct.hfreq = 0.3;       // shorthand for highFreqMultiplier
+
+// Frame rate
+dct.fps = 30;
+dct.fps = 0;  // Unlimited
 ```
 
-| Property / Uniform   | Shorthand | Type  | Default | Description                             |
-|----------------------|-----------|-------|---------|-----------------------------------------|
-| `blockSize`          | `blockSize` | int | 8       | DCT block size (2–64, like JPEG 8×8)   |
-| `lpf`                | `lpf`     | float | 128.0   | Low-pass filter cutoff                  |
-| `highFreqMultiplier` | `hfreq`   | float | 0.0     | Boost/cut high-frequency coefficients   |
-| `quantizeY`          | `qY`      | float | 0.0     | Luminance quantization (0–100)          |
-| `quantizeYf`         | `qYf`     | float | 0.0     | Luminance quantization freq-dependent   |
-| `quantizeC`          | `qC`      | float | 0.0     | Chrominance quantization (0–100)        |
-| `quantizeCf`         | `qCf`     | float | 0.0     | Chrominance quantization freq-dependent |
-| `quantizeA`          | `qA`      | float | 0.0     | Alpha quantization (0–100)              |
-| `quantizeAf`         | `qAf`     | float | 0.0     | Alpha quantization freq-dependent       |
-| `bypassDCT`          | `bypassDCT` | bool | false | Skip forward DCT (treat input as raw coefficients) |
-| `bypassRDCT`         | `bypassRDCT` | bool | false | Skip inverse DCT (output raw coefficients) |
-| `yOnly`              | `yOnly`   | bool  | false   | Process luminance channel only          |
+## Display & Resolution
 
-Quantize values above 1 are treated as percentages (0–100) and normalized automatically.
+```js
+// Display size in page (CSS)
+dct.resizeCanvas(800, 600);
+
+// Render resolution (processing resolution)
+dct.setResolution(1024, 1024);
+
+// How source maps to canvas
+dct.input.fit = 'stretch';  // Default
+dct.input.fit = 'fit';      // Letterbox
+dct.input.fit = 'fill';     // Crop
+```
+
+## DCT/IDCT Control
+
+Enable/disable transform passes independently:
+
+```js
+// Forward DCT (spatial → frequency domain)
+dct.dctHorizontal = true;
+dct.dctVertical = true;
+
+// Inverse DCT (frequency → spatial domain)
+dct.rdctHorizontal = true;
+dct.rdctVertical = true;
+
+// Or use setters
+dct.setDCT(true, false);    // Only horizontal
+dct.setRDCT(false, true);   // Only vertical inverse
+```
+
+## Full API
+
+### Constructor
+```js
+new DCTLive({
+  width: 256,         // Render width (default)
+  height: 256,        // Render height (default)
+  loop: true,         // Auto-start loop (optional)
+  canvas: canvasEl    // Use existing canvas (optional)
+})
+```
+
+### Source Loading (async)
+- `initImage(url, opts)` — Image or HTMLImageElement
+- `initVideo(url, opts)` — Video or HTMLVideoElement
+- `initCanvas(canvas, opts)` — HTMLCanvasElement or context
+- `initCam(selector, opts)` — Camera (index or label string)
+
+### Rendering
+- `run()` — One frame
+- `start()` — Start loop
+- `stop()` — Stop loop
+
+### Display
+- `show()` / `hide()` — Visibility
+- `mount(element)` — Insert into DOM
+- `unmount()` — Remove from DOM
+- `resizeCanvas(w, h)` — Display size
+- `setResolution(w, h)` — Render resolution
+
+### Configuration
+- `setFPS(fps)` — Frame rate
+- `setDCT(h, v)` — Forward DCT passes
+- `setRDCT(h, v)` — Inverse DCT passes
+- `setUniform(name, val)` — Single uniform
+- `setUniforms(obj)` — Multiple uniforms
+- `setWaveFunction(glsl)` — Replace IDCT wave function
+- `resetWaveFunction()` — Restore default
+
+### Properties (Shorthand)
+```js
+dct.blockSize           // 2–64 (default 8)
+dct.lpf                 // 0–128 (default 128, no blur)
+dct.hfreq               // High frequency multiplier
+dct.qY, dct.qC          // Luminance, chrominance quantization (0–100)
+dct.qYf, dct.qCf        // Frequency-dependent quantization
+dct.qA, dct.qAf         // Alpha quantization
+dct.yOnly               // Drop color channels (bool)
+
+dct.input.fit           // 'fit' | 'fill' | 'stretch'
+dct.input.filter        // 'linear' | 'nearest' — sets both mag and min
+dct.input.wrap          // 'clamp' | 'repeat' | 'mirror' | 'mask'
+
+dct.fps                 // Get/set frame rate
+dct.uniforms            // All shader parameters (object)
+```
 
 ## Examples
 
-### Basic setup
+### Real-time compression control
 ```js
 const dct = new DCTLive({ width: 512, height: 512 });
+document.body.appendChild(dct.canvas);
 await dct.initImage('image.png');
-dct.mount(document.body);
-dct.show();
-// loop: true by default, so rendering starts immediately after initImage
-```
 
-### Disable auto-loop
-```js
-const dct = new DCTLive({ width: 512, height: 512, loop: false });
-await dct.initImage('image.png');
-dct.run(); // manual single render
-```
-
-### Granular pass control
-```js
-// Show only DCT coefficients (skip inverse DCT)
-dct.setDCT(true, true);    // both horizontal and vertical forward passes
-dct.setRDCT(false, false); // disable all inverse passes
-dct.run();
-
-// Apply only horizontal inverse DCT
-dct.setDCT(true, true);
-dct.setRDCT(true, false);
-dct.run();
-
-// Skip all transforms (output input directly)
-dct.setDCT(false, false);
-dct.setRDCT(false, false);
-dct.run(); // canvas shows raw input image
-```
-
-### Dynamic parameter control
-```js
-// Via shorthand properties (recommended for livecoding)
-dct.blockSize = 16;
-dct.qY = 0.5;
-dct.hfreq = 0.3;
-dct.lpf = 64;
-
-// Via setUniform / setUniforms
-dct.setUniform('blockSize', 16);
-dct.setUniforms({
-  blockSize: 8,
-  lpf: 100,
-  highFreqMultiplier: 0.5
+// Slider to control compression
+document.querySelector('input[type=range]').addEventListener('input', (e) => {
+  dct.blockSize = e.target.value;
+  dct.qY = e.target.value * 2;
 });
+
+dct.start();
 ```
 
-### CSS display size vs. processing resolution
+### Show only coefficients
 ```js
-// Render at 256×256 but display at 512×512 (upscaled via CSS)
-const dct = new DCTLive({ width: 256, height: 256 });
-dct.resizeCanvas(512, 512);    // CSS size only — no re-allocation
-
-// Change actual WebGL resolution (re-allocates framebuffers)
-dct.setResolution(512, 512);
+dct.setDCT(true, true);      // Forward passes
+dct.setRDCT(false, false);   // No reconstruction
+dct.run();  // Shows raw frequency domain
 ```
 
-## Usage Notes
+### Frequency manipulation
+```js
+// Sharpen (boost high frequencies)
+dct.hfreq = 2.5;
+dct.run();
 
-- `loop` defaults to `true` — rendering starts automatically once any `init*` call completes.
-- All `init*` functions are async and return Promises. Use `await` or `.then()` to sequence work after load.
-- The render loop can be started before an input source is ready via `start()`; it will render once `initImage()`, `initVideo()`, or `initCanvas()` supplies a texture.
-- `setResolution()` changes processing dimensions and re-allocates WebGL framebuffers. It does **not** change CSS display size.
-- `resizeCanvas()` only sets CSS `width`/`height` on the canvas — no framebuffer reallocation.
-- Pass control (`setDCT()`, `setRDCT()`) takes effect on the next `run()` call. Default is all passes enabled (full DCT→IDCT pipeline).
-- When all passes are disabled, the library uses a fast passthrough shader instead of running transforms.
+// Posterize (reduce color, keep luminance)
+dct.yOnly = true;
+dct.qC = 100;
+dct.run();
+```
+
+## Notes
+
+- **Loop default** — `loop: true` auto-starts rendering after any `init*` call
+- **Async sources** — All `init*` calls return Promises; use `await`
+- **Resolution vs display** — `setResolution()` changes processing; `resizeCanvas()` is CSS only
+- **WebGL required** — No fallbacks for older browsers
+- **CORS** — Loading external images/video requires CORS headers
 
 ## Development
 
 ```bash
 npm install
 npm run build
-npm run serve   # serves /demo on localhost
+npm run dev     # Watch mode
+npm run serve   # Dev server on port 3000
 ```
 
-## Credits & Acknowledgments
-
-**Design & API:** geikha
-**DCT shader reference:** [FMS-Cat](https://twitter.com/FMS_Cat) — [Testing DCT quantization shader](https://www.youtube.com/watch?v=xt4UFRPqX_w)  
-**Guidance:** [sol sarratea](https://solsarratea.world/)
-
-The heavy lifting of coding with WebGL (the API, not the shaders) in this library was done using Claude Code. It also helped documenting, adding comments, and separating the codebase into different files.
+**License:** GPL-3.0

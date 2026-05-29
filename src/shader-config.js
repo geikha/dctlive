@@ -8,14 +8,12 @@ const DEFAULT_UNIFORMS = {
   quantizeCf: 0.0,
   quantizeA: 0.0,
   quantizeAf: 0.0,
-  bypassRDCT: false,
-  bypassDCT: false,
   yOnly: false,
 };
 
 function normalizeQuantize(name, value) {
   if (/^quantize/.test(name) && typeof value === 'number') {
-    if (value > 1) {
+    if (value >= 1) {
       return Math.min(Math.max(value, 0), 100) / 100;
     }
   }

@@ -9,18 +9,19 @@ import dctForwardYFrag from './shaders/dct-forward-y.frag';
 import dctInverseFrag from './shaders/dct-inverse.frag';
 import dctInverseYFrag from './shaders/dct-inverse-y.frag';
 import passthroughFrag from './shaders/passthrough.frag';
+import blitClampFrag from './shaders/blit-clamp.frag';
+import blitRepeatFrag from './shaders/blit-repeat.frag';
+import blitMirrorFrag from './shaders/blit-mirror.frag';
+import blitMaskFrag from './shaders/blit-mask.frag';
 
 const DEFAULT_WAVE_BODY = 'return cos(angle);';
 
 function buildInverseSource(templateSrc, waveBody) {
-  const replaced = templateSrc.replace(
-    /float\s+wave\s*\(\s*float\s+angle\s*\)\s*\{[^}]*\}/,
-    `float wave(float angle) {\n  ${waveBody}\n}`
-  );
-  if (replaced === templateSrc) {
+  const pattern = /float\s+wave\s*\(\s*float\s+angle\s*\)\s*\{[^}]*\}/;
+  if (!pattern.test(templateSrc)) {
     throw new Error('DCTLive: could not locate wave(float angle) function in inverse shader');
   }
-  return replaced;
+  return templateSrc.replace(pattern, `float wave(float angle) {\n  ${waveBody}\n}`);
 }
 
 export default class RenderPipeline {
@@ -47,6 +48,14 @@ export default class RenderPipeline {
 
     this._passthroughProgram = buildProgram(gl, quadVert, passthroughFrag);
 
+    // Blit programs — one per wrap mode, no branching in shaders
+    this._blitPrograms = {
+      clamp:  buildProgram(gl, quadVert, blitClampFrag),
+      repeat: buildProgram(gl, quadVert, blitRepeatFrag),
+      mirror: buildProgram(gl, quadVert, blitMirrorFrag),
+      mask:   buildProgram(gl, quadVert, blitMaskFrag),
+    };
+
     // Fullscreen quad buffer
     this._quadBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
@@ -56,7 +65,7 @@ export default class RenderPipeline {
       gl.STATIC_DRAW
     );
 
-    // Framebuffers for 4-pass pipeline
+    // Framebuffers
     this._createFramebuffers();
   }
 
@@ -94,6 +103,9 @@ export default class RenderPipeline {
   render(config) {
     const {
       inputTexture,
+      uvScale,
+      uvOffset,
+      wrap,
       dctHorizontal,
       dctVertical,
       rdctHorizontal,
@@ -104,7 +116,10 @@ export default class RenderPipeline {
     if (!inputTexture) return;
 
     const gl = this.gl;
-    let currentTexture = inputTexture;
+
+    // Blit raw source into _fbInput, applying fit UV transform and wrap mode
+    this._runBlit(inputTexture, uvScale, uvOffset, wrap);
+    let currentTexture = this._fbInput.texture;
     const anyDCTEnabled = dctHorizontal || dctVertical;
     const anyRDCTEnabled = rdctHorizontal || rdctVertical;
 
@@ -163,26 +178,47 @@ export default class RenderPipeline {
 
   _createFramebuffers() {
     const gl = this.gl;
+    this._fbInput = createFloatFramebuffer(gl, this.width, this.height);
     this._fbTempA = createFloatFramebuffer(gl, this.width, this.height);
-    this._fbDCT = createFloatFramebuffer(gl, this.width, this.height);
+    this._fbDCT   = createFloatFramebuffer(gl, this.width, this.height);
     this._fbTempB = createFloatFramebuffer(gl, this.width, this.height);
   }
 
   _resizeFramebuffers() {
     const gl = this.gl;
-    if (this._fbTempA) {
-      gl.deleteFramebuffer(this._fbTempA.framebuffer);
-      gl.deleteTexture(this._fbTempA.texture);
-    }
-    if (this._fbDCT) {
-      gl.deleteFramebuffer(this._fbDCT.framebuffer);
-      gl.deleteTexture(this._fbDCT.texture);
-    }
-    if (this._fbTempB) {
-      gl.deleteFramebuffer(this._fbTempB.framebuffer);
-      gl.deleteTexture(this._fbTempB.texture);
+    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+      if (fb) {
+        gl.deleteFramebuffer(fb.framebuffer);
+        gl.deleteTexture(fb.texture);
+      }
     }
     this._createFramebuffers();
+  }
+
+  _runBlit(rawTex, uvScale, uvOffset, wrap) {
+    const gl = this.gl;
+    const prog = this._blitPrograms[wrap] || this._blitPrograms.mask;
+
+    gl.useProgram(prog);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbInput.framebuffer);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    const posLoc = gl.getAttribLocation(prog, 'position');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    gl.uniform2f(gl.getUniformLocation(prog, 'resolution'), this.width, this.height);
+    gl.uniform2fv(gl.getUniformLocation(prog, 'uvScale'), uvScale);
+    gl.uniform2fv(gl.getUniformLocation(prog, 'uvOffset'), uvOffset);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, rawTex);
+    gl.uniform1i(gl.getUniformLocation(prog, 'inputTexture'), 0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
   _renderPass(program, { target, inputTexture, isVert, isForward }, resolveUniform) {
@@ -250,12 +286,11 @@ export default class RenderPipeline {
     gl.deleteProgram(this._inverseColorProgram);
     gl.deleteProgram(this._inverseYOnlyProgram);
     gl.deleteProgram(this._passthroughProgram);
+    for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
     gl.deleteBuffer(this._quadBuffer);
-    gl.deleteFramebuffer(this._fbTempA.framebuffer);
-    gl.deleteTexture(this._fbTempA.texture);
-    gl.deleteFramebuffer(this._fbDCT.framebuffer);
-    gl.deleteTexture(this._fbDCT.texture);
-    gl.deleteFramebuffer(this._fbTempB.framebuffer);
-    gl.deleteTexture(this._fbTempB.texture);
+    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+      gl.deleteFramebuffer(fb.framebuffer);
+      gl.deleteTexture(fb.texture);
+    }
   }
 }

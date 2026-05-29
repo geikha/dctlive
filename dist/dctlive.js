@@ -1,191 +1,102 @@
 var DCTLiveModule = (function (exports) {
   'use strict';
 
-  /**
-   * InputSource — Manages an input source (image, video, canvas) for DCTLive.
-   *
-   * Handles texture creation, scaling/fitting, filter modes, wrap modes,
-   * and dynamic source updating (video/canvas re-upload each frame).
-   *
-   * Usage:
-   *   const src = new InputSource(gl, dctWidth, dctHeight);
-   *   await src.loadImage('photo.png', { fit: 'fit' });
-   *   // or
-   *   src.setVideo(videoElement, { fit: 'fill', filter: 'nearest' });
-   *   // or
-   *   src.setCanvas(otherCanvas, { wrap: 'repeat' });
-   *
-   *   // Each frame (called by DCTLive.run automatically):
-   *   src.update();  // re-uploads texture data if source is dynamic
-   */
-
-  // ---- GL constant maps ----
-
   const FILTER_MAP = {
     linear: 'LINEAR',
     nearest: 'NEAREST',
   };
 
-  const WRAP_MAP = {
-    clamp: 'CLAMP_TO_EDGE',
-    repeat: 'REPEAT',
-    mirror: 'MIRRORED_REPEAT',
-  };
-
   const FIT_MODES = ['stretch', 'fill', 'fit'];
-
-  // ---- Class ----
+  const WRAP_MODES = ['clamp', 'repeat', 'mirror', 'mask'];
 
   class InputSource {
-    /**
-     * @param {WebGLRenderingContext} gl
-     * @param {number} targetWidth  - DCT processing width
-     * @param {number} targetHeight - DCT processing height
-     */
     constructor(gl, targetWidth, targetHeight) {
       this.gl = gl;
       this.targetWidth = targetWidth;
       this.targetHeight = targetHeight;
 
-      // The WebGL texture used as shader input
       this.texture = null;
 
-      // Current settings (defaults)
       this._minFilter = 'linear';
       this._magFilter = 'linear';
-      this._wrapS = 'clamp';
-      this._wrapT = 'clamp';
+      this._wrap = 'mask';
       this._fit = 'stretch';
 
-      // Source tracking
-      this._source = null;       // HTMLImageElement | HTMLVideoElement | HTMLCanvasElement
-      this._isDynamic = false;   // true for video/canvas → re-upload each frame
-      this._needsUpload = false; // flag to upload on next update()
+      this._source = null;
+      this._isDynamic = false;
+      this._sourceWidth = 0;
+      this._sourceHeight = 0;
 
-      // Offscreen canvas for fit/scaling
-      this._offscreen = document.createElement('canvas');
-      this._offscreen.width = targetWidth;
-      this._offscreen.height = targetHeight;
-      this._offscreenCtx = this._offscreen.getContext('2d');
+      // Cached UV transform — recomputed only when source/fit/resolution changes
+      this._uvScale = [1, 1];
+      this._uvOffset = [0, 0];
     }
 
-    /**
-     * Update the input target resolution.
-     * @param {number} width
-     * @param {number} height
-     */
     setTargetSize(width, height) {
       this.targetWidth = Math.max(1, Math.floor(width));
       this.targetHeight = Math.max(1, Math.floor(height));
-      this._offscreen.width = this.targetWidth;
-      this._offscreen.height = this.targetHeight;
-      this._offscreenCtx = this._offscreen.getContext('2d');
-      if (this._source) {
-        this._drawToOffscreen(this._source);
-        this._needsUpload = true;
-      }
+      this._updateUVTransform();
     }
 
-    // ---- Public settings ----
+    // ---- Setters ----
 
-    /**
-     * Set texture minification filter.
-     * @param {'linear'|'nearest'} mode
-     */
+    set filter(mode) {
+      this._minFilter = mode;
+      this._magFilter = mode;
+      this._applyTexParams();
+    }
+
     set minFilter(mode) {
       this._minFilter = mode;
       this._applyTexParams();
     }
     get minFilter() { return this._minFilter; }
 
-    /**
-     * Set texture magnification filter.
-     * @param {'linear'|'nearest'} mode
-     */
     set magFilter(mode) {
       this._magFilter = mode;
       this._applyTexParams();
     }
     get magFilter() { return this._magFilter; }
 
-    /**
-     * Set texture wrap mode for S (horizontal).
-     * @param {'clamp'|'repeat'|'mirror'} mode
-     */
-    set wrapS(mode) {
-      this._wrapS = mode;
-      this._applyTexParams();
-    }
-    get wrapS() { return this._wrapS; }
-
-    /**
-     * Set texture wrap mode for T (vertical).
-     * @param {'clamp'|'repeat'|'mirror'} mode
-     */
-    set wrapT(mode) {
-      this._wrapT = mode;
-      this._applyTexParams();
-    }
-    get wrapT() { return this._wrapT; }
-
-    /**
-     * Set both wrap modes at once.
-     * @param {'clamp'|'repeat'|'mirror'} mode
-     */
     set wrap(mode) {
-      this._wrapS = mode;
-      this._wrapT = mode;
-      this._applyTexParams();
+      if (!WRAP_MODES.includes(mode)) {
+        console.warn(`InputSource: unknown wrap mode "${mode}"`);
+        return;
+      }
+      this._wrap = mode;
     }
+    get wrap() { return this._wrap; }
 
-    /**
-     * Set fit mode (how source is drawn onto the target dimensions).
-     * @param {'stretch'|'fill'|'fit'} mode
-     */
     set fit(mode) {
       if (!FIT_MODES.includes(mode)) {
         console.warn(`InputSource: unknown fit mode "${mode}"`);
         return;
       }
       this._fit = mode;
-      // Re-draw existing source with new fit
-      if (this._source) {
-        this._drawToOffscreen(this._source);
-        this._needsUpload = true;
-      }
+      this._updateUVTransform();
     }
     get fit() { return this._fit; }
 
-    /**
-     * Bulk-set options.
-     * @param {Object} opts - { minFilter, magFilter, wrapS, wrapT, wrap, fit }
-     */
+    // Read-only cached UV transform
+    get uvScale() { return this._uvScale; }
+    get uvOffset() { return this._uvOffset; }
+
+    // Only 'fit' can produce out-of-bounds UVs; stretch/fill always stay in [0,1]
+    get effectiveWrap() { return this._fit === 'fit' ? this._wrap : 'clamp'; }
+
     setOptions(opts = {}) {
       if (opts.minFilter) this._minFilter = opts.minFilter;
       if (opts.magFilter) this._magFilter = opts.magFilter;
-      if (opts.wrap) {
-        this._wrapS = opts.wrap;
-        this._wrapT = opts.wrap;
+      if (opts.wrap && WRAP_MODES.includes(opts.wrap)) this._wrap = opts.wrap;
+      if (opts.fit && FIT_MODES.includes(opts.fit)) {
+        this._fit = opts.fit;
       }
-      if (opts.wrapS) this._wrapS = opts.wrapS;
-      if (opts.wrapT) this._wrapT = opts.wrapT;
-      if (opts.fit && FIT_MODES.includes(opts.fit)) this._fit = opts.fit;
       this._applyTexParams();
-      // Re-draw if source exists and fit changed
-      if (this._source && opts.fit) {
-        this._drawToOffscreen(this._source);
-        this._needsUpload = true;
-      }
+      if (opts.fit) this._updateUVTransform();
     }
 
     // ---- Source loaders ----
 
-    /**
-     * Load an image from a URL.
-     * @param {string} url
-     * @param {Object} [opts] - { fit, minFilter, magFilter, wrapS, wrapT, wrap }
-     * @returns {Promise<void>}
-     */
     loadImage(url, opts = {}) {
       if (opts) this.setOptions(opts);
       return new Promise((resolve, reject) => {
@@ -200,33 +111,16 @@ var DCTLiveModule = (function (exports) {
       });
     }
 
-    /**
-     * Set an HTMLImageElement directly.
-     * @param {HTMLImageElement} img
-     * @param {Object} [opts]
-     */
     setImage(img, opts = {}) {
       if (opts) this.setOptions(opts);
       this._setSource(img, false);
     }
 
-    /**
-     * Set an HTMLVideoElement as a dynamic source.
-     * The texture will be re-uploaded every frame.
-     * @param {HTMLVideoElement} video
-     * @param {Object} [opts]
-     */
     setVideo(video, opts = {}) {
       if (opts) this.setOptions(opts);
       this._setSource(video, true);
     }
 
-    /**
-     * Set another HTMLCanvasElement as a dynamic source.
-     * The texture will be re-uploaded every frame.
-     * @param {HTMLCanvasElement} canvas
-     * @param {Object} [opts]
-     */
     setCanvas(canvas, opts = {}) {
       if (opts) this.setOptions(opts);
       this._setSource(canvas, true);
@@ -234,125 +128,117 @@ var DCTLiveModule = (function (exports) {
 
     // ---- Frame update ----
 
-    /**
-     * Called each frame before rendering.
-     * Re-uploads the texture if the source is dynamic (video/canvas).
-     */
     update() {
       if (!this._source || !this.texture) return;
-
       if (this._isDynamic) {
-        // Dynamic sources: always re-draw and re-upload
-        this._drawToOffscreen(this._source);
         this._uploadTexture();
-      } else if (this._needsUpload) {
-        // Static source that was redrawn (e.g. fit changed)
-        this._uploadTexture();
-        this._needsUpload = false;
       }
     }
 
     // ---- Internal ----
 
-    /**
-     * @private
-     */
     _setSource(source, isDynamic) {
       this._source = source;
       this._isDynamic = isDynamic;
 
-      // Draw to offscreen (applies fit)
-      this._drawToOffscreen(source);
+      const sw = source.videoWidth || source.naturalWidth || source.width;
+      const sh = source.videoHeight || source.naturalHeight || source.height;
+      this._sourceWidth = sw;
+      this._sourceHeight = sh;
 
-      // Create texture if needed
       if (!this.texture) {
         this.texture = this.gl.createTexture();
       }
 
-      // Upload and set params
       this._uploadTexture();
       this._applyTexParams();
+      this._updateUVTransform();
     }
 
-    /**
-     * Draw the source onto the offscreen canvas with the current fit mode.
-     * @private
-     */
-    _drawToOffscreen(source) {
-      const ctx = this._offscreenCtx;
-      const cw = this.targetWidth;
-      const ch = this.targetHeight;
-
-      // Clear
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, cw, ch);
-
-      // Source dimensions
-      const sw = source.videoWidth || source.width;
-      const sh = source.videoHeight || source.height;
-      if (!sw || !sh) return; // video not ready yet
-
-      const srcAspect = sw / sh;
-      const tgtAspect = cw / ch;
-      let dw, dh, dx, dy;
-
-      switch (this._fit) {
-        case 'stretch':
-          dw = cw; dh = ch; dx = 0; dy = 0;
-          break;
-        case 'fill':
-          if (srcAspect > tgtAspect) {
-            dh = ch; dw = dh * srcAspect;
-          } else {
-            dw = cw; dh = dw / srcAspect;
-          }
-          dx = (cw - dw) / 2;
-          dy = (ch - dh) / 2;
-          break;
-        case 'fit':
-        default:
-          if (srcAspect > tgtAspect) {
-            dw = cw; dh = dw / srcAspect;
-          } else {
-            dh = ch; dw = dh * srcAspect;
-          }
-          dx = (cw - dw) / 2;
-          dy = (ch - dh) / 2;
-          break;
-      }
-
-      ctx.drawImage(source, dx, dy, dw, dh);
-    }
-
-    /**
-     * Upload the offscreen canvas to the GL texture.
-     * @private
-     */
     _uploadTexture() {
       const gl = this.gl;
+      const source = this._source;
+      if (!source) return;
+
+      // For video, skip if not ready
+      const sw = source.videoWidth || source.naturalWidth || source.width;
+      const sh = source.videoHeight || source.naturalHeight || source.height;
+      if (!sw || !sh) return;
+
+      // Update stored dimensions in case video size became available
+      if (sw !== this._sourceWidth || sh !== this._sourceHeight) {
+        this._sourceWidth = sw;
+        this._sourceHeight = sh;
+        this._updateUVTransform();
+      }
+
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this._offscreen);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.bindTexture(gl.TEXTURE_2D, null);
     }
 
-    /**
-     * Apply current filter and wrap params to the texture.
-     * @private
-     */
     _applyTexParams() {
       if (!this.texture) return;
       const gl = this.gl;
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl[FILTER_MAP[this._minFilter]] || gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl[FILTER_MAP[this._magFilter]] || gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl[WRAP_MAP[this._wrapS]] || gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl[WRAP_MAP[this._wrapT]] || gl.CLAMP_TO_EDGE);
+      // Always clamp — blit shaders handle wrap modes themselves (NPOT-safe)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindTexture(gl.TEXTURE_2D, null);
     }
 
-    /**
-     * Clean up GL resources.
-     */
+    _updateUVTransform() {
+      const sw = this._sourceWidth;
+      const sh = this._sourceHeight;
+      const tw = this.targetWidth;
+      const th = this.targetHeight;
+
+      if (!sw || !sh) {
+        this._uvScale = [1, 1];
+        this._uvOffset = [0, 0];
+        return;
+      }
+
+      const srcAspect = sw / sh;
+      const tgtAspect = tw / th;
+
+      if (this._fit === 'stretch') {
+        this._uvScale = [1, 1];
+        this._uvOffset = [0, 0];
+        return;
+      }
+
+      let sx, sy;
+
+      if (this._fit === 'fit') {
+        if (srcAspect > tgtAspect) {
+          // Wider source: letterbox top/bottom
+          sy = srcAspect / tgtAspect;
+          this._uvScale = [1, sy];
+          this._uvOffset = [0, -(sy - 1) / 2];
+        } else {
+          // Taller source: pillarbox left/right
+          sx = tgtAspect / srcAspect;
+          this._uvScale = [sx, 1];
+          this._uvOffset = [-(sx - 1) / 2, 0];
+        }
+      } else if (this._fit === 'fill') {
+        if (srcAspect > tgtAspect) {
+          // Wider source: crop sides
+          sx = tgtAspect / srcAspect;
+          this._uvScale = [sx, 1];
+          this._uvOffset = [(1 - sx) / 2, 0];
+        } else {
+          // Taller source: crop top/bottom
+          sy = srcAspect / tgtAspect;
+          this._uvScale = [1, sy];
+          this._uvOffset = [0, (1 - sy) / 2];
+        }
+      }
+    }
+
     destroy() {
       if (this.texture) {
         this.gl.deleteTexture(this.texture);
@@ -459,17 +345,22 @@ var DCTLiveModule = (function (exports) {
 
   var passthroughFrag = "precision highp float;\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  gl_FragColor = texture2D(inputTexture, uv);\n}\n";
 
+  var blitClampFrag = "precision highp float;\nuniform sampler2D inputTexture;\nuniform vec2 resolution;\nuniform vec2 uvScale;\nuniform vec2 uvOffset;\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  gl_FragColor = texture2D(inputTexture, uv * uvScale + uvOffset);\n}\n";
+
+  var blitRepeatFrag = "precision highp float;\nuniform sampler2D inputTexture;\nuniform vec2 resolution;\nuniform vec2 uvScale;\nuniform vec2 uvOffset;\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  gl_FragColor = texture2D(inputTexture, fract(uv * uvScale + uvOffset));\n}\n";
+
+  var blitMirrorFrag = "precision highp float;\nuniform sampler2D inputTexture;\nuniform vec2 resolution;\nuniform vec2 uvScale;\nuniform vec2 uvOffset;\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  uv = uv * uvScale + uvOffset;\n  vec2 t = fract(uv * 0.5) * 2.0;\n  uv = 1.0 - abs(t - 1.0);\n  gl_FragColor = texture2D(inputTexture, uv);\n}\n";
+
+  var blitMaskFrag = "precision highp float;\nuniform sampler2D inputTexture;\nuniform vec2 resolution;\nuniform vec2 uvScale;\nuniform vec2 uvOffset;\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  uv = uv * uvScale + uvOffset;\n  vec2 inBounds = step(vec2(0.0), uv) * step(uv, vec2(1.0));\n  float mask = inBounds.x * inBounds.y;\n  gl_FragColor = texture2D(inputTexture, uv) * mask;\n}\n";
+
   const DEFAULT_WAVE_BODY = 'return cos(angle);';
 
   function buildInverseSource(templateSrc, waveBody) {
-    const replaced = templateSrc.replace(
-      /float\s+wave\s*\(\s*float\s+angle\s*\)\s*\{[^}]*\}/,
-      `float wave(float angle) {\n  ${waveBody}\n}`
-    );
-    if (replaced === templateSrc) {
+    const pattern = /float\s+wave\s*\(\s*float\s+angle\s*\)\s*\{[^}]*\}/;
+    if (!pattern.test(templateSrc)) {
       throw new Error('DCTLive: could not locate wave(float angle) function in inverse shader');
     }
-    return replaced;
+    return templateSrc.replace(pattern, `float wave(float angle) {\n  ${waveBody}\n}`);
   }
 
   class RenderPipeline {
@@ -496,6 +387,14 @@ var DCTLiveModule = (function (exports) {
 
       this._passthroughProgram = buildProgram(gl, quadVert, passthroughFrag);
 
+      // Blit programs — one per wrap mode, no branching in shaders
+      this._blitPrograms = {
+        clamp:  buildProgram(gl, quadVert, blitClampFrag),
+        repeat: buildProgram(gl, quadVert, blitRepeatFrag),
+        mirror: buildProgram(gl, quadVert, blitMirrorFrag),
+        mask:   buildProgram(gl, quadVert, blitMaskFrag),
+      };
+
       // Fullscreen quad buffer
       this._quadBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
@@ -505,7 +404,7 @@ var DCTLiveModule = (function (exports) {
         gl.STATIC_DRAW
       );
 
-      // Framebuffers for 4-pass pipeline
+      // Framebuffers
       this._createFramebuffers();
     }
 
@@ -543,6 +442,9 @@ var DCTLiveModule = (function (exports) {
     render(config) {
       const {
         inputTexture,
+        uvScale,
+        uvOffset,
+        wrap,
         dctHorizontal,
         dctVertical,
         rdctHorizontal,
@@ -553,7 +455,10 @@ var DCTLiveModule = (function (exports) {
       if (!inputTexture) return;
 
       this.gl;
-      let currentTexture = inputTexture;
+
+      // Blit raw source into _fbInput, applying fit UV transform and wrap mode
+      this._runBlit(inputTexture, uvScale, uvOffset, wrap);
+      let currentTexture = this._fbInput.texture;
       const anyDCTEnabled = dctHorizontal || dctVertical;
       const anyRDCTEnabled = rdctHorizontal || rdctVertical;
 
@@ -612,26 +517,47 @@ var DCTLiveModule = (function (exports) {
 
     _createFramebuffers() {
       const gl = this.gl;
+      this._fbInput = createFloatFramebuffer(gl, this.width, this.height);
       this._fbTempA = createFloatFramebuffer(gl, this.width, this.height);
-      this._fbDCT = createFloatFramebuffer(gl, this.width, this.height);
+      this._fbDCT   = createFloatFramebuffer(gl, this.width, this.height);
       this._fbTempB = createFloatFramebuffer(gl, this.width, this.height);
     }
 
     _resizeFramebuffers() {
       const gl = this.gl;
-      if (this._fbTempA) {
-        gl.deleteFramebuffer(this._fbTempA.framebuffer);
-        gl.deleteTexture(this._fbTempA.texture);
-      }
-      if (this._fbDCT) {
-        gl.deleteFramebuffer(this._fbDCT.framebuffer);
-        gl.deleteTexture(this._fbDCT.texture);
-      }
-      if (this._fbTempB) {
-        gl.deleteFramebuffer(this._fbTempB.framebuffer);
-        gl.deleteTexture(this._fbTempB.texture);
+      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+        if (fb) {
+          gl.deleteFramebuffer(fb.framebuffer);
+          gl.deleteTexture(fb.texture);
+        }
       }
       this._createFramebuffers();
+    }
+
+    _runBlit(rawTex, uvScale, uvOffset, wrap) {
+      const gl = this.gl;
+      const prog = this._blitPrograms[wrap] || this._blitPrograms.mask;
+
+      gl.useProgram(prog);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbInput.framebuffer);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      const posLoc = gl.getAttribLocation(prog, 'position');
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+      gl.uniform2f(gl.getUniformLocation(prog, 'resolution'), this.width, this.height);
+      gl.uniform2fv(gl.getUniformLocation(prog, 'uvScale'), uvScale);
+      gl.uniform2fv(gl.getUniformLocation(prog, 'uvOffset'), uvOffset);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, rawTex);
+      gl.uniform1i(gl.getUniformLocation(prog, 'inputTexture'), 0);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     _renderPass(program, { target, inputTexture, isVert, isForward }, resolveUniform) {
@@ -699,13 +625,12 @@ var DCTLiveModule = (function (exports) {
       gl.deleteProgram(this._inverseColorProgram);
       gl.deleteProgram(this._inverseYOnlyProgram);
       gl.deleteProgram(this._passthroughProgram);
+      for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
       gl.deleteBuffer(this._quadBuffer);
-      gl.deleteFramebuffer(this._fbTempA.framebuffer);
-      gl.deleteTexture(this._fbTempA.texture);
-      gl.deleteFramebuffer(this._fbDCT.framebuffer);
-      gl.deleteTexture(this._fbDCT.texture);
-      gl.deleteFramebuffer(this._fbTempB.framebuffer);
-      gl.deleteTexture(this._fbTempB.texture);
+      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+        gl.deleteFramebuffer(fb.framebuffer);
+        gl.deleteTexture(fb.texture);
+      }
     }
   }
 
@@ -763,14 +688,12 @@ var DCTLiveModule = (function (exports) {
     quantizeCf: 0.0,
     quantizeA: 0.0,
     quantizeAf: 0.0,
-    bypassRDCT: false,
-    bypassDCT: false,
     yOnly: false,
   };
 
   function normalizeQuantize(name, value) {
     if (/^quantize/.test(name) && typeof value === 'number') {
-      if (value > 1) {
+      if (value >= 1) {
         return Math.min(Math.max(value, 0), 100) / 100;
       }
     }
@@ -834,10 +757,6 @@ var DCTLiveModule = (function (exports) {
    *   await dct.initImage('image.png');
    *   dct.show();
    *   dct.start();
-   *
-   *   // Bypass modes:
-   *   dct.bypassDCT = true;   // Skip forward DCT, treat input as raw coefficients
-   *   dct.bypassRDCT = true;  // Show DCT coefficients instead of reconstructed image
    */
 
 
@@ -907,8 +826,6 @@ var DCTLiveModule = (function (exports) {
         hfreq: 'highFreqMultiplier',
         blockSize: 'blockSize',
         lpf: 'lpf',
-        bypassRDCT: 'bypassRDCT',
-        bypassDCT: 'bypassDCT',
       };
 
       for (const [shorthand, fullName] of Object.entries(shorthandMap)) {
@@ -1057,6 +974,87 @@ var DCTLiveModule = (function (exports) {
       }
     }
 
+    /**
+     * Initialize camera input from device camera(s).
+     * @param {number|string} [selector=0] - Camera index (number) or label (string)
+     * @param {Object} [opts] - { constraints }
+     * @returns {Promise<HTMLVideoElement>}
+     */
+    async initCam(selector = 0, opts = {}) {
+      try {
+        async function getCameras() {
+          let devices = await navigator.mediaDevices.enumerateDevices();
+          let cameras = devices.filter((d) => d.kind === 'videoinput');
+          if (!cameras.some((d) => d.deviceId)) {
+            // Permission not yet granted — trigger prompt, stop immediately, re-enumerate
+            const temp = await navigator.mediaDevices.getUserMedia({ video: true });
+            temp.getTracks().forEach((t) => t.stop());
+            devices = await navigator.mediaDevices.enumerateDevices();
+            cameras = devices.filter((d) => d.kind === 'videoinput');
+          }
+          return cameras;
+        }
+
+        const cameras = await getCameras();
+
+        let device;
+        if (typeof selector === 'number') {
+          device = cameras[selector];
+        } else if (typeof selector === 'string') {
+          device = cameras.find((d) => d.label === selector);
+          if (!device) device = cameras.find((d) => d.label.toLowerCase().includes(selector.toLowerCase()));
+        }
+
+        if (!device && cameras.length === 0) {
+          console.warn('DCTLive.initCam: no cameras found');
+          return;
+        }
+
+        const constraints = opts.constraints || {
+          video: device
+            ? { deviceId: { exact: device.deviceId }, width: { ideal: this.width }, height: { ideal: this.height } }
+            : { width: { ideal: this.width }, height: { ideal: this.height } },
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        video.muted = true;
+        video.playsInline = true;
+
+        return new Promise((resolve) => {
+          const cleanup = () => {
+            video.removeEventListener('loadeddata', onLoadedData);
+            video.removeEventListener('error', onError);
+          };
+
+          const onLoadedData = () => {
+            cleanup();
+            this.input.setVideo(video, opts);
+            this.run();
+            if (this._autoLoop) this.start();
+            resolve(video);
+          };
+
+          const onError = (e) => {
+            cleanup();
+            console.warn('DCTLive.initCam: video error:', e);
+            resolve(video);
+          };
+
+          video.addEventListener('loadeddata', onLoadedData, { once: true });
+          video.addEventListener('error', onError, { once: true });
+          video.play().catch((e) => {
+            console.warn('DCTLive.initCam: play() blocked:', e);
+          });
+        });
+      } catch (err) {
+        const msg = `Camera error: ${err.name || 'unknown'} - ${err.message || err}`;
+        console.error('DCTLive.initCam:', msg);
+        throw err;
+      }
+    }
+
     // ---- Uniform setters ----
 
     setUniform(name, value) {
@@ -1143,6 +1141,9 @@ var DCTLiveModule = (function (exports) {
       this.input.update();
       this._pipeline.render({
         inputTexture: this.input.texture,
+        uvScale:      this.input.uvScale,
+        uvOffset:     this.input.uvOffset,
+        wrap:         this.input.effectiveWrap,
         dctHorizontal: this.dctHorizontal,
         dctVertical: this.dctVertical,
         rdctHorizontal: this.rdctHorizontal,

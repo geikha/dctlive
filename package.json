@@ -2,6 +2,12 @@
   "name": "dctlive",
   "version": "0.1.0",
   "description": "WebGL implementation of JPEG-like DCT with real-time controls",
+  "author": "geikha",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geikha/dctlive.git"
+  },
   "main": "dist/dctlive.js",
   "module": "dist/dctlive.esm.js",
   "exports": {
@@ -12,12 +18,14 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "rollup -c rollup.config.mjs",
     "dev": "rollup -c rollup.config.mjs -w",
-    "serve": "npx serve demo"
+    "serve": "npx serve"
   },
   "keywords": [
     "dct",
@@ -26,7 +34,6 @@
     "glsl",
     "image-processing"
   ],
-  "license": "MIT",
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.0",
     "@rollup/plugin-node-resolve": "^16.0.0",

@@ -11,10 +11,6 @@
  *   await dct.initImage('image.png');
  *   dct.show();
  *   dct.start();
- *
- *   // Bypass modes:
- *   dct.bypassDCT = true;   // Skip forward DCT, treat input as raw coefficients
- *   dct.bypassRDCT = true;  // Show DCT coefficients instead of reconstructed image
  */
 
 import InputSource from './input-source.js';
@@ -90,8 +86,6 @@ export default class DCTLive {
       hfreq: 'highFreqMultiplier',
       blockSize: 'blockSize',
       lpf: 'lpf',
-      bypassRDCT: 'bypassRDCT',
-      bypassDCT: 'bypassDCT',
     };
 
     for (const [shorthand, fullName] of Object.entries(shorthandMap)) {
@@ -240,6 +234,87 @@ export default class DCTLive {
     }
   }
 
+  /**
+   * Initialize camera input from device camera(s).
+   * @param {number|string} [selector=0] - Camera index (number) or label (string)
+   * @param {Object} [opts] - { constraints }
+   * @returns {Promise<HTMLVideoElement>}
+   */
+  async initCam(selector = 0, opts = {}) {
+    try {
+      async function getCameras() {
+        let devices = await navigator.mediaDevices.enumerateDevices();
+        let cameras = devices.filter((d) => d.kind === 'videoinput');
+        if (!cameras.some((d) => d.deviceId)) {
+          // Permission not yet granted — trigger prompt, stop immediately, re-enumerate
+          const temp = await navigator.mediaDevices.getUserMedia({ video: true });
+          temp.getTracks().forEach((t) => t.stop());
+          devices = await navigator.mediaDevices.enumerateDevices();
+          cameras = devices.filter((d) => d.kind === 'videoinput');
+        }
+        return cameras;
+      }
+
+      const cameras = await getCameras();
+
+      let device;
+      if (typeof selector === 'number') {
+        device = cameras[selector];
+      } else if (typeof selector === 'string') {
+        device = cameras.find((d) => d.label === selector);
+        if (!device) device = cameras.find((d) => d.label.toLowerCase().includes(selector.toLowerCase()));
+      }
+
+      if (!device && cameras.length === 0) {
+        console.warn('DCTLive.initCam: no cameras found');
+        return;
+      }
+
+      const constraints = opts.constraints || {
+        video: device
+          ? { deviceId: { exact: device.deviceId }, width: { ideal: this.width }, height: { ideal: this.height } }
+          : { width: { ideal: this.width }, height: { ideal: this.height } },
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+
+      return new Promise((resolve) => {
+        const cleanup = () => {
+          video.removeEventListener('loadeddata', onLoadedData);
+          video.removeEventListener('error', onError);
+        };
+
+        const onLoadedData = () => {
+          cleanup();
+          this.input.setVideo(video, opts);
+          this.run();
+          if (this._autoLoop) this.start();
+          resolve(video);
+        };
+
+        const onError = (e) => {
+          cleanup();
+          console.warn('DCTLive.initCam: video error:', e);
+          resolve(video);
+        };
+
+        video.addEventListener('loadeddata', onLoadedData, { once: true });
+        video.addEventListener('error', onError, { once: true });
+        video.play().catch((e) => {
+          console.warn('DCTLive.initCam: play() blocked:', e);
+        });
+      });
+    } catch (err) {
+      const msg = `Camera error: ${err.name || 'unknown'} - ${err.message || err}`;
+      console.error('DCTLive.initCam:', msg);
+      throw err;
+    }
+  }
+
   // ---- Uniform setters ----
 
   setUniform(name, value) {
@@ -326,6 +401,9 @@ export default class DCTLive {
     this.input.update();
     this._pipeline.render({
       inputTexture: this.input.texture,
+      uvScale:      this.input.uvScale,
+      uvOffset:     this.input.uvOffset,
+      wrap:         this.input.effectiveWrap,
       dctHorizontal: this.dctHorizontal,
       dctVertical: this.dctVertical,
       rdctHorizontal: this.rdctHorizontal,
