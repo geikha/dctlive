@@ -687,7 +687,7 @@
   libScript.onerror = () => {
     // Fallback to CDN if local build not available
     const cdnScript = document.createElement('script');
-    cdnScript.src = 'https://unpkg.com/@geikha/dctlive@latest/dist/dctlive.js';
+    cdnScript.src = 'https://unpkg.com/dctlive@latest/dist/dctlive.js';
     cdnScript.onload = initDemo;
     document.head.appendChild(cdnScript);
   };
