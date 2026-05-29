@@ -98,6 +98,34 @@
     }
 
     #panel-head .title { font-size: 13px; letter-spacing: 0.5px; }
+
+    #precision-warning {
+      display: none;
+      background: rgba(242, 119, 122, 0.15);
+      border: 1px solid var(--error);
+      padding: 6px 8px;
+      font-size: 10px;
+      color: var(--error);
+      line-height: 1.4;
+      margin-bottom: 6px;
+      cursor: pointer;
+      transition: opacity 0.3s ease;
+    }
+
+    #precision-warning.show {
+      display: block;
+      animation: slideDown 0.3s ease;
+    }
+
+    #precision-warning.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
     #panel-head .title em { font-style: normal; color: var(--accent); }
 
     #panel-head a {
@@ -319,6 +347,7 @@
         <span class="title">dct<em>live</em></span>
         <a href="https://geikha.xyz" target="_blank" rel="noopener">by geikha</a>
       </div>
+      <div id="precision-warning"></div>
       <span id="status">ready</span>
     </div>
 
@@ -496,9 +525,30 @@
     const RENDER_W = 512, RENDER_H = 512;
     const { w: initW, h: initH } = calcDisplaySize(RENDER_W, RENDER_H);
 
-    const dct = new DCTLive({ width: RENDER_W, height: RENDER_H, loop: true });
+    const precision = new URLSearchParams(window.location.search).get('precision') || '16bit';
+    const dct = new DCTLive({ width: RENDER_W, height: RENDER_H, loop: true, precision });
     document.getElementById('canvas-area').appendChild(dct.canvas);
     dct.resizeCanvas(initW, initH);
+
+    // Show warning if 8-bit precision is detected
+    const warningEl = document.getElementById('precision-warning');
+    if (dct.precision === '8bit') {
+      warningEl.textContent = 'Mobile devices default to 8bit precision, which can cause noisy results';
+      warningEl.classList.add('show');
+
+      // Auto-dismiss after 5 seconds
+      const warningTimeout = setTimeout(() => {
+        warningEl.classList.add('fade-out');
+        setTimeout(() => warningEl.classList.remove('show', 'fade-out'), 300);
+      }, 5000);
+
+      // Dismiss on click
+      warningEl.addEventListener('click', () => {
+        clearTimeout(warningTimeout);
+        warningEl.classList.add('fade-out');
+        setTimeout(() => warningEl.classList.remove('show', 'fade-out'), 300);
+      });
+    }
 
     function refreshCanvasSize() {
       const { w, h } = calcDisplaySize(dct.width, dct.height);

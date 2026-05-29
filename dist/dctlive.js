@@ -307,16 +307,17 @@ var DCTLiveModule = (function (exports) {
   }
 
   /**
-   * Create a floating-point framebuffer (render target).
+   * Create a framebuffer with the given texture type.
    * @param {WebGLRenderingContext} gl
    * @param {number} width
    * @param {number} height
+   * @param {number} texType - gl.FLOAT, HALF_FLOAT_OES, or gl.UNSIGNED_BYTE
    * @returns {{ framebuffer: WebGLFramebuffer, texture: WebGLTexture }}
    */
-  function createFloatFramebuffer(gl, width, height) {
+  function createFramebuffer(gl, width, height, texType) {
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, texType, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -326,11 +327,40 @@ var DCTLiveModule = (function (exports) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
 
-    // Unbind
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     return { framebuffer, texture };
+  }
+
+  /**
+   * Resolve the best available texture type for the requested precision.
+   * Fallback chain: '32bit' → float → half-float → UNSIGNED_BYTE
+   *                 '16bit' → half-float → UNSIGNED_BYTE
+   *                 '8bit'  → UNSIGNED_BYTE (always)
+   * @param {WebGLRenderingContext} gl
+   * @param {'32bit'|'16bit'|'8bit'} [requested='16bit']
+   * @returns {{ type: number, actual: '32bit'|'16bit'|'8bit' }}
+   */
+  function resolveTexType(gl, requested = '16bit') {
+    if (requested !== '8bit') {
+      if (requested === '32bit') {
+        const extFloat = gl.getExtension('OES_texture_float');
+        if (extFloat) {
+          gl.getExtension('OES_texture_float_linear');
+          return { type: gl.FLOAT, actual: '32bit' };
+        }
+      }
+      const extHalf = gl.getExtension('OES_texture_half_float');
+      if (extHalf) {
+        gl.getExtension('OES_texture_half_float_linear');
+        return { type: extHalf.HALF_FLOAT_OES, actual: '16bit' };
+      }
+    }
+    if (requested !== '8bit') {
+      console.warn('DCTLive: float/half-float textures unavailable, falling back to 8-bit precision');
+    }
+    return { type: gl.UNSIGNED_BYTE, actual: '8bit' };
   }
 
   var quadVert = "attribute vec2 position;\r\n\r\nvoid main() {\r\n  gl_Position = vec4(position, 0.0, 1.0);\r\n}\r\n";
@@ -364,30 +394,16 @@ var DCTLiveModule = (function (exports) {
   }
 
   class RenderPipeline {
-    constructor(gl, width, height) {
+    constructor(gl, width, height, texType) {
       this.gl = gl;
       this.width = width;
       this.height = height;
-
-      // Build shader programs (color and Y-only variants)
-      this._forwardColorProgram = buildProgram(gl, quadVert, dctForwardFrag);
-      this._forwardYOnlyProgram = buildProgram(gl, quadVert, dctForwardYFrag);
-      this._inverseColorProgram = buildProgram(gl, quadVert, dctInverseFrag);
-      this._inverseYOnlyProgram = buildProgram(gl, quadVert, dctInverseYFrag);
-
-      // Active pointers (start with color variants)
-      this._forwardProgram = this._forwardColorProgram;
-      this._inverseProgram = this._inverseColorProgram;
-
-      // Templates for wave function updates
-      this._inverseFragTemplate = dctInverseFrag;
-      this._inverseYFragTemplate = dctInverseYFrag;
-      this._waveBody = DEFAULT_WAVE_BODY;
+      this._texType = texType;
       this._yOnly = false;
+      this._waveBody = DEFAULT_WAVE_BODY;
 
       this._passthroughProgram = buildProgram(gl, quadVert, passthroughFrag);
 
-      // Blit programs — one per wrap mode, no branching in shaders
       this._blitPrograms = {
         clamp:  buildProgram(gl, quadVert, blitClampFrag),
         repeat: buildProgram(gl, quadVert, blitRepeatFrag),
@@ -395,21 +411,36 @@ var DCTLiveModule = (function (exports) {
         mask:   buildProgram(gl, quadVert, blitMaskFrag),
       };
 
-      // Fullscreen quad buffer
       this._quadBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
-      gl.bufferData(
-        gl.ARRAY_BUFFER,
-        new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
-        gl.STATIC_DRAW
-      );
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
-      // Framebuffers
+      this._buildPrograms();
       this._createFramebuffers();
+    }
+
+    _buildPrograms() {
+      const gl = this.gl;
+
+      this._forwardColorProgram = buildProgram(gl, quadVert, dctForwardFrag);
+      this._forwardYOnlyProgram = buildProgram(gl, quadVert, dctForwardYFrag);
+
+      this._inverseFragTemplate  = dctInverseFrag;
+      this._inverseYFragTemplate = dctInverseYFrag;
+
+      this._inverseColorProgram = buildProgram(gl, quadVert, dctInverseFrag);
+      this._inverseYOnlyProgram = buildProgram(gl, quadVert, dctInverseYFrag);
+
+      // H and V use the same program for float/16-bit — no per-pass encoding needed
+      this._activeFwdH = this._forwardColorProgram;
+      this._activeFwdV = this._forwardColorProgram;
+      this._activeInvH = this._inverseColorProgram;
+      this._activeInvV = this._inverseColorProgram;
     }
 
     setWaveFunction(glslBody) {
       const gl = this.gl;
+
       const colorSource = buildInverseSource(this._inverseFragTemplate, glslBody);
       const yOnlySource = buildInverseSource(this._inverseYFragTemplate, glslBody);
 
@@ -419,7 +450,9 @@ var DCTLiveModule = (function (exports) {
       this._inverseColorProgram = buildProgram(gl, quadVert, colorSource);
       this._inverseYOnlyProgram = buildProgram(gl, quadVert, yOnlySource);
 
-      this._inverseProgram = this._yOnly ? this._inverseYOnlyProgram : this._inverseColorProgram;
+      this._activeInvH = this._yOnly ? this._inverseYOnlyProgram : this._inverseColorProgram;
+      this._activeInvV = this._activeInvH;
+
       this._waveBody = glslBody;
     }
 
@@ -429,8 +462,12 @@ var DCTLiveModule = (function (exports) {
 
     setYOnly(enabled) {
       this._yOnly = enabled;
-      this._forwardProgram = enabled ? this._forwardYOnlyProgram : this._forwardColorProgram;
-      this._inverseProgram = enabled ? this._inverseYOnlyProgram : this._inverseColorProgram;
+      const fwd = enabled ? this._forwardYOnlyProgram : this._forwardColorProgram;
+      const inv = enabled ? this._inverseYOnlyProgram : this._inverseColorProgram;
+      this._activeFwdH = fwd;
+      this._activeFwdV = fwd;
+      this._activeInvH = inv;
+      this._activeInvV = inv;
     }
 
     setResolution(width, height) {
@@ -456,15 +493,14 @@ var DCTLiveModule = (function (exports) {
 
       this.gl;
 
-      // Blit raw source into _fbInput, applying fit UV transform and wrap mode
       this._runBlit(inputTexture, uvScale, uvOffset, wrap);
       let currentTexture = this._fbInput.texture;
-      const anyDCTEnabled = dctHorizontal || dctVertical;
+      const anyDCTEnabled  = dctHorizontal || dctVertical;
       const anyRDCTEnabled = rdctHorizontal || rdctVertical;
 
       if (anyDCTEnabled) {
         if (dctHorizontal) {
-          this._renderPass(this._forwardProgram, {
+          this._renderPass(this._activeFwdH, {
             target: this._fbTempA.framebuffer,
             inputTexture: currentTexture,
             isVert: false,
@@ -474,7 +510,7 @@ var DCTLiveModule = (function (exports) {
         }
 
         if (dctVertical) {
-          this._renderPass(this._forwardProgram, {
+          this._renderPass(this._activeFwdV, {
             target: this._fbDCT.framebuffer,
             inputTexture: currentTexture,
             isVert: true,
@@ -486,7 +522,7 @@ var DCTLiveModule = (function (exports) {
 
       if (anyRDCTEnabled) {
         if (rdctHorizontal) {
-          this._renderPass(this._inverseProgram, {
+          this._renderPass(this._activeInvH, {
             target: this._fbTempB.framebuffer,
             inputTexture: currentTexture,
             isVert: false,
@@ -496,14 +532,14 @@ var DCTLiveModule = (function (exports) {
         }
 
         if (rdctVertical) {
-          this._renderPass(this._inverseProgram, {
+          this._renderPass(this._activeInvV, {
             target: null,
             inputTexture: currentTexture,
             isVert: true,
             isForward: false,
           }, resolveUniform);
         } else {
-          this._renderPass(this._inverseProgram, {
+          this._renderPass(this._activeInvV, {
             target: null,
             inputTexture: currentTexture,
             isVert: false,
@@ -517,10 +553,11 @@ var DCTLiveModule = (function (exports) {
 
     _createFramebuffers() {
       const gl = this.gl;
-      this._fbInput = createFloatFramebuffer(gl, this.width, this.height);
-      this._fbTempA = createFloatFramebuffer(gl, this.width, this.height);
-      this._fbDCT   = createFloatFramebuffer(gl, this.width, this.height);
-      this._fbTempB = createFloatFramebuffer(gl, this.width, this.height);
+      const t = this._texType;
+      this._fbInput = createFramebuffer(gl, this.width, this.height, t);
+      this._fbTempA = createFramebuffer(gl, this.width, this.height, t);
+      this._fbDCT   = createFramebuffer(gl, this.width, this.height, t);
+      this._fbTempB = createFramebuffer(gl, this.width, this.height, t);
     }
 
     _resizeFramebuffers() {
@@ -585,11 +622,11 @@ var DCTLiveModule = (function (exports) {
 
       if (isForward) {
         gl.uniform1f(gl.getUniformLocation(program, 'highFreqMultiplier'), resolveUniform('highFreqMultiplier'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeY'), resolveUniform('quantizeY'));
+        gl.uniform1f(gl.getUniformLocation(program, 'quantizeY'),  resolveUniform('quantizeY'));
         gl.uniform1f(gl.getUniformLocation(program, 'quantizeYf'), resolveUniform('quantizeYf'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeC'), resolveUniform('quantizeC'));
+        gl.uniform1f(gl.getUniformLocation(program, 'quantizeC'),  resolveUniform('quantizeC'));
         gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'), resolveUniform('quantizeA'));
+        gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
         gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
       }
 
@@ -620,13 +657,175 @@ var DCTLiveModule = (function (exports) {
 
     destroy() {
       const gl = this.gl;
+
       gl.deleteProgram(this._forwardColorProgram);
       gl.deleteProgram(this._forwardYOnlyProgram);
       gl.deleteProgram(this._inverseColorProgram);
       gl.deleteProgram(this._inverseYOnlyProgram);
       gl.deleteProgram(this._passthroughProgram);
+
       for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
       gl.deleteBuffer(this._quadBuffer);
+
+      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+        gl.deleteFramebuffer(fb.framebuffer);
+        gl.deleteTexture(fb.texture);
+      }
+    }
+  }
+
+  // 8-bit RGBM encoding.
+  //
+  // PROBLEM
+  // Each color channel gets 256 possible values. The DCT math produces numbers
+  // outside that range. We need a way to squeeze them into 0-255.
+  //
+  // SOLUTION: Two ideas working together
+  //
+  // 1. COMPANDING
+  //    Idea: Don't spread precision evenly. Instead, give more detail to small
+  //    numbers (where we need it) and less detail to large numbers.
+  //    Method: Use sqrt() — it naturally squeezes large numbers closer together.
+  //    During encode: c = sqrt(n)  →  small numbers spread far apart, large cluster
+  //    During decode: n = c²       →  expand back to original (one multiply)
+  //
+  // 2. RGBM (RGB + Multiplier)
+  //    Each pixel stores its own scale (its biggest RGB value) in alpha.
+  //    All three RGB values in that pixel scale relative to that value, always
+  //    using the full 0–255 range regardless of magnitude.
+  //    RGBM_MAX is the assumed upper bound for any coefficient. Values above
+  //    it get clamped. Values below it are encoded with full precision.
+  //    The DCT applies a normalization factor (2/blockSize) to prevent larger
+  //    blocks from producing larger coefficients. So RGBM_MAX can stay the same
+  //    regardless of blockSize.
+  //
+  // THE PIPELINE
+  // Four stages, each a separate shader program. Each stage decodes input (if needed),
+  // does its math, then re-encodes for the next stage:
+  //   1. fwdH   input → compress to 8-bit
+  //   2. fwdV   decompress → apply quantization → compress to 8-bit
+  //   3. invH   decompress → inverse transform → compress to 8-bit
+  //   4. invV   decompress → inverse transform → output (no compression needed)
+
+  // Upper bound assumed for DCT coefficient magnitude. Coefficients above this get
+  // clamped. Lower values = more precision for small coefficients, less headroom for large ones.
+  const RGBM_MAX = 4.0;
+
+  const RGBM_ENCODE =
+    `float mv = max(max(abs(sum.x), abs(sum.y)), abs(sum.z)); ` +
+    `mv = clamp(mv, 0.01, ${RGBM_MAX.toFixed(1)}); ` +
+    'vec3 nrm = sum.xyz / mv; ' +
+    'gl_FragColor.xyz = (sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5; ' +
+    `gl_FragColor.w = sqrt(mv / ${RGBM_MAX.toFixed(1)});`;
+
+  function rgbmDecode(sampleExpr) {
+    return (
+      `vec4 texVal = ${sampleExpr}; ` +
+      `float mv = texVal.w * texVal.w * ${RGBM_MAX.toFixed(1)}; ` +
+      'vec3 cmp = texVal.xyz * 2.0 - 1.0; ' +
+      'vec4 val = vec4((cmp * abs(cmp)) * mv, 1.0);'
+    );
+  }
+
+  function buildFwdH(src) {
+    return src.replace('gl_FragColor = sum;', RGBM_ENCODE);
+  }
+
+  function buildFwdV(src) {
+    return src
+      .replace('vec4 val = texture2D(inputTexture, uv);', rgbmDecode('texture2D(inputTexture, uv)'))
+      .replace('gl_FragColor = sum;', RGBM_ENCODE);
+  }
+
+  function buildInvH(src) {
+    return src
+      .replace(
+        'vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);',
+        rgbmDecode('texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution)')
+      )
+      .replace('gl_FragColor = sum;', RGBM_ENCODE);
+  }
+
+  function buildInvV(src) {
+    return src
+      .replace(
+        'vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);',
+        rgbmDecode('texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution)')
+      )
+      .replace('gl_FragColor = sum;', 'gl_FragColor = clamp(sum, 0.0, 1.0); gl_FragColor.a = 1.0;');
+  }
+
+  class RenderPipeline8bit extends RenderPipeline {
+    _buildPrograms() {
+      const gl = this.gl;
+
+      // Precompute injected forward sources (static — no wave replacement needed)
+      this._fwdColorH_src = buildFwdH(dctForwardFrag);
+      this._fwdColorV_src = buildFwdV(dctForwardFrag);
+      this._fwdYH_src     = buildFwdH(dctForwardYFrag);
+      this._fwdYV_src     = buildFwdV(dctForwardYFrag);
+
+      // Precompute injected inverse templates (wave replacement operates on these)
+      this._invColorH_tpl = buildInvH(dctInverseFrag);
+      this._invColorV_tpl = buildInvV(dctInverseFrag);
+      this._invYH_tpl     = buildInvH(dctInverseYFrag);
+      this._invYV_tpl     = buildInvV(dctInverseYFrag);
+
+      this._fwdColorH = buildProgram(gl, quadVert, this._fwdColorH_src);
+      this._fwdColorV = buildProgram(gl, quadVert, this._fwdColorV_src);
+      this._fwdYH     = buildProgram(gl, quadVert, this._fwdYH_src);
+      this._fwdYV     = buildProgram(gl, quadVert, this._fwdYV_src);
+
+      this._invColorH = buildProgram(gl, quadVert, buildInverseSource(this._invColorH_tpl, DEFAULT_WAVE_BODY));
+      this._invColorV = buildProgram(gl, quadVert, buildInverseSource(this._invColorV_tpl, DEFAULT_WAVE_BODY));
+      this._invYH     = buildProgram(gl, quadVert, buildInverseSource(this._invYH_tpl, DEFAULT_WAVE_BODY));
+      this._invYV     = buildProgram(gl, quadVert, buildInverseSource(this._invYV_tpl, DEFAULT_WAVE_BODY));
+
+      this._activeFwdH = this._fwdColorH;
+      this._activeFwdV = this._fwdColorV;
+      this._activeInvH = this._invColorH;
+      this._activeInvV = this._invColorV;
+    }
+
+    setWaveFunction(glslBody) {
+      const gl = this.gl;
+
+      gl.deleteProgram(this._invColorH);
+      gl.deleteProgram(this._invColorV);
+      gl.deleteProgram(this._invYH);
+      gl.deleteProgram(this._invYV);
+
+      this._invColorH = buildProgram(gl, quadVert, buildInverseSource(this._invColorH_tpl, glslBody));
+      this._invColorV = buildProgram(gl, quadVert, buildInverseSource(this._invColorV_tpl, glslBody));
+      this._invYH     = buildProgram(gl, quadVert, buildInverseSource(this._invYH_tpl, glslBody));
+      this._invYV     = buildProgram(gl, quadVert, buildInverseSource(this._invYV_tpl, glslBody));
+
+      this._activeInvH = this._yOnly ? this._invYH : this._invColorH;
+      this._activeInvV = this._yOnly ? this._invYV : this._invColorV;
+
+      this._waveBody = glslBody;
+    }
+
+    setYOnly(enabled) {
+      this._yOnly = enabled;
+      this._activeFwdH = enabled ? this._fwdYH : this._fwdColorH;
+      this._activeFwdV = enabled ? this._fwdYV : this._fwdColorV;
+      this._activeInvH = enabled ? this._invYH : this._invColorH;
+      this._activeInvV = enabled ? this._invYV : this._invColorV;
+    }
+
+    destroy() {
+      const gl = this.gl;
+
+      for (const prog of [
+        this._fwdColorH, this._fwdColorV, this._fwdYH, this._fwdYV,
+        this._invColorH, this._invColorV, this._invYH, this._invYV,
+      ]) gl.deleteProgram(prog);
+
+      gl.deleteProgram(this._passthroughProgram);
+      for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
+      gl.deleteBuffer(this._quadBuffer);
+
       for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
         gl.deleteFramebuffer(fb.framebuffer);
         gl.deleteTexture(fb.texture);
@@ -786,17 +985,17 @@ var DCTLiveModule = (function (exports) {
       if (!gl) throw new Error('WebGL not supported');
       this.gl = gl;
 
-      // Required extensions for float textures
-      const extFloat = gl.getExtension('OES_texture_float');
-      if (!extFloat) throw new Error('OES_texture_float extension not supported');
-      gl.getExtension('OES_texture_float_linear');
-
       // GL state
       gl.disable(gl.DEPTH_TEST);
       gl.disable(gl.BLEND);
 
+      // Resolve texture precision (default '16bit', fallback chain: 16→8 or 32→16→8)
+      const { type: texType, actual: precision } = resolveTexType(gl, opts.precision || '16bit');
+      this._precision = precision;
+
       // Modules
-      this._pipeline = new RenderPipeline(gl, this.width, this.height);
+      const Pipeline = precision === '8bit' ? RenderPipeline8bit : RenderPipeline;
+      this._pipeline = new Pipeline(gl, this.width, this.height, texType);
       this._display = new DisplayController(this.canvas);
       this._config = new ShaderConfig();
 
@@ -854,6 +1053,10 @@ var DCTLiveModule = (function (exports) {
 
     get uniforms() {
       return this._config.uniforms;
+    }
+
+    get precision() {
+      return this._precision;
     }
 
     get fps() {

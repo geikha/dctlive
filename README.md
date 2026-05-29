@@ -19,15 +19,21 @@ Or use from CDN:
 
 ## Quick Start
 
-### Minimal Setup
+### Example Setup
 ```js
 const dct = new DCTLive({ width: 512, height: 512 });
 document.body.appendChild(dct.canvas);
 await dct.initImage('image.png');
+
 dct.start();
+
+// Change parameters in real-time
+dct.blockSize = 16;
+dct.qY = 0.5;
+dct.hfreq = 1.5;
 ```
 
-### Load Sources
+### Loading Sources
 ```js
 // Image from URL
 await dct.initImage('https://example.com/image.jpg');
@@ -111,7 +117,8 @@ new DCTLive({
   width: 256,         // Render width (default)
   height: 256,        // Render height (default)
   loop: true,         // Auto-start loop (optional)
-  canvas: canvasEl    // Use existing canvas (optional)
+  canvas: canvasEl,   // Use existing canvas (optional)
+  precision: '16bit'  // Texture precision: '32bit' | '16bit' | '8bit' (default '16bit')
 })
 ```
 
@@ -144,6 +151,7 @@ new DCTLive({
 
 ### Properties (Shorthand)
 ```js
+dct.precision           // '32bit' | '16bit' | '8bit' (read-only, set at construction)
 dct.blockSize           // 2–64 recommended (default 8)
 dct.lpf                 // 0–128 (default 128)
 dct.hfreq               // High frequency multiplier
@@ -160,41 +168,56 @@ dct.fps                 // Get/set frame rate
 dct.uniforms            // All shader parameters (object)
 ```
 
-## Examples
+## Precision Modes
 
-### Real-time compression control
+DCTLive supports three texture precision modes. The mode is set at construction and cannot be changed afterward. The library auto-detects available hardware and falls back if needed.
+
 ```js
-const dct = new DCTLive({ width: 512, height: 512 });
-document.body.appendChild(dct.canvas);
-await dct.initImage('image.png');
+// 32-bit float (highest precision, requires OES_texture_float)
+const dct = new DCTLive({ precision: '32bit' });
 
-// Slider to control compression
-document.querySelector('input[type=range]').addEventListener('input', (e) => {
-  dct.blockSize = e.target.value;
-  dct.qY = e.target.value * 0.5;
-});
+// 16-bit half-float (balanced, requires OES_texture_half_float)
+const dct = new DCTLive({ precision: '16bit' });  // Default
 
-dct.start();
+// 8-bit RGBA (smallest, widest device support)
+const dct = new DCTLive({ precision: '8bit' });
 ```
 
-### Show only coefficients
+### Mode Comparison
+
+| Mode | Precision | Device Support | Use Case |
+|------|-----------|-----------------|----------|
+| **32-bit** | Highest (no loss) | Desktop/newer mobile | Professional quality, unlimited block sizes |
+| **16-bit** | Very good | Most modern devices | Best balance of quality and compatibility |
+| **8-bit** | Good (lossy encoding) | Older phones, budget devices | Mobile-first, constrained devices |
+
+### How It Works
+
+- **16-bit & 32-bit** — Direct storage, full precision at each stage
+- **8-bit** — Uses RGBM encoding (per-pixel scale multiplier in alpha) + signed-sqrt companding to maximize precision within 256 levels per channel
+
+### Fallback Chain
+
+If requested precision unavailable:
+- Request `'32bit'` → tries 32 → 16 → 8
+- Request `'16bit'` → tries 16 → 8
+- Request `'8bit'` → always succeeds (no extensions needed)
+
+### Query Actual Precision
+
 ```js
-dct.setDCT(true, true);      // Forward passes
-dct.setRDCT(false, false);   // No reconstruction
-dct.run();  // Shows raw frequency domain
+dct.precision  // Returns '32bit' | '16bit' | '8bit' (actual, after fallback)
 ```
 
-### Frequency manipulation
-```js
-// Sharpen (boost high frequencies)
-dct.hfreq = 2.5;
-dct.run();
+### URL Parameter (Demo)
 
-// Posterize (reduce color, keep luminance)
-dct.yOnly = true;
-dct.qC = 1.0;
-dct.run();
+For testing, use the query string:
 ```
+?precision=8bit    // Force 8-bit
+?precision=16bit   // Force 16-bit (default)
+?precision=32bit   // Force 32-bit
+```
+
 
 ## Notes
 

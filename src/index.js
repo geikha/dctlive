@@ -15,8 +15,10 @@
 
 import InputSource from './input-source.js';
 import RenderPipeline from './render-pipeline.js';
+import RenderPipeline8bit from './render-pipeline-8bit.js';
 import DisplayController from './display-controller.js';
 import ShaderConfig from './shader-config.js';
+import { resolveTexType } from './gl-utils.js';
 
 export { InputSource };
 
@@ -45,17 +47,17 @@ export default class DCTLive {
     if (!gl) throw new Error('WebGL not supported');
     this.gl = gl;
 
-    // Required extensions for float textures
-    const extFloat = gl.getExtension('OES_texture_float');
-    if (!extFloat) throw new Error('OES_texture_float extension not supported');
-    gl.getExtension('OES_texture_float_linear');
-
     // GL state
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
 
+    // Resolve texture precision (default '16bit', fallback chain: 16→8 or 32→16→8)
+    const { type: texType, actual: precision } = resolveTexType(gl, opts.precision || '16bit');
+    this._precision = precision;
+
     // Modules
-    this._pipeline = new RenderPipeline(gl, this.width, this.height);
+    const Pipeline = precision === '8bit' ? RenderPipeline8bit : RenderPipeline;
+    this._pipeline = new Pipeline(gl, this.width, this.height, texType);
     this._display = new DisplayController(this.canvas);
     this._config = new ShaderConfig();
 
@@ -113,6 +115,10 @@ export default class DCTLive {
 
   get uniforms() {
     return this._config.uniforms;
+  }
+
+  get precision() {
+    return this._precision;
   }
 
   get fps() {
