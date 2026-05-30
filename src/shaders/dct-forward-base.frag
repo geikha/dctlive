@@ -8,9 +8,6 @@
   - 0: Y-only mode (luminance extraction, float accumulation, cheaper inner loop)
 */
 
-#pragma glslify: rgb2ycbcr = require('./modules/color-conversion.glsl')
-#pragma glslify: extractLuminance = require('./modules/color-extraction.glsl')
-
 #define PI 3.14159265
 
 precision highp float;
@@ -21,6 +18,20 @@ uniform int blockSize;
 uniform sampler2D inputTexture;
 
 uniform float highFreqMultiplier;
+
+// RGB to YCbCr conversion (ITU-R BT.601)
+vec3 rgb2ycbcr(vec3 rgb) {
+  return vec3(
+     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,
+    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,
+     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b
+  );
+}
+
+// Extract luminance (Y) from RGBA using ITU-R BT.601 weights
+float extractLuminance(vec4 rgba) {
+  return dot(rgba.rgb, vec3(0.299, 0.587, 0.114));
+}
 
 void main() {
   // Direction vector: (1,0) for horizontal, (0,1) for vertical

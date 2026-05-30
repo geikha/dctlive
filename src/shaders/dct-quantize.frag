@@ -5,8 +5,6 @@
   Runs between forward and inverse when any DCT pass is enabled
 */
 
-#pragma glslify: quantize = require('./modules/quantization.glsl')
-
 precision highp float;
 
 uniform vec2 resolution;
@@ -20,6 +18,11 @@ uniform float quantizeCf;
 uniform float quantizeA;
 uniform float quantizeAf;
 uniform bool isColorMode;
+
+// Quantization: round to nearest step, preserving symmetry around zero
+float quantize(float value, float step) {
+  return floor(value / step + 0.5) * step;
+}
 
 void main() {
   // Read DCT coefficient at this fragment

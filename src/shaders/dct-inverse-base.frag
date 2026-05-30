@@ -8,8 +8,6 @@
   - 0: Y-only mode (luminance broadcasted to RGB)
 */
 
-#pragma glslify: ycbcr2rgb = require('./modules/color-conversion.glsl')
-
 #define PI 3.14159265
 #define PI2 6.28318530
 #define hPI 1.57079632
@@ -23,6 +21,15 @@ uniform sampler2D inputTexture;
 uniform float lpf;
 uniform float time;
 uniform float wi;
+
+// YCbCr to RGB conversion (ITU-R BT.601)
+vec3 ycbcr2rgb(vec3 yuv) {
+  return vec3(
+    yuv.x + 1.402    * yuv.z,
+    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,
+    yuv.x + 1.772    * yuv.y
+  );
+}
 
 bool validuv(vec2 v) {
   return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;
