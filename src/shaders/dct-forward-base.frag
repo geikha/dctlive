@@ -62,11 +62,6 @@ void main() {
     // Convert pixel coords to UV
     vec2 uv = (blockOrigin + delta) / resolution;
 
-    // Flip Y on horizontal pass (WebGL texture coords vs image coords)
-    if (!isVert) {
-      uv = vec2(0.0, 1.0) + vec2(1.0, -1.0) * uv;
-    }
-
     vec4 val = texture2D(inputTexture, uv);
 
     // Process color or luminance on first (horizontal) pass

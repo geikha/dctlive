@@ -18,6 +18,7 @@ export default class InputSource {
     this._magFilter = 'linear';
     this._wrap = 'mask';
     this._fit = 'stretch';
+    this._flipY = false;  // false: flip texture on load (standard orientation), true: no flip on load
 
     this._source = null;
     this._isDynamic = false;
@@ -73,6 +74,11 @@ export default class InputSource {
     this._updateUVTransform();
   }
   get fit() { return this._fit; }
+
+  set flipY(val) {
+    this._flipY = !!val;
+  }
+  get flipY() { return this._flipY; }
 
   // Read-only cached UV transform
   get uvScale() { return this._uvScale; }
@@ -170,6 +176,9 @@ export default class InputSource {
     }
 
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    // flipY=false (default): flip on load (standard image orientation)
+    // flipY=true: don't flip on load (WebGL bottom-left origin)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !this._flipY ? 1 : 0);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.bindTexture(gl.TEXTURE_2D, null);
   }

@@ -122,6 +122,15 @@ export default class DCTLive {
     return this._precision;
   }
 
+  get flipY() {
+    return this._display.flipY;
+  }
+
+  set flipY(value) {
+    this._display.flipY = value;
+    this.input.flipY = value;
+  }
+
   get fps() {
     return this._config.fps;
   }

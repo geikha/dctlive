@@ -2,6 +2,7 @@ export default class DisplayController {
   constructor(canvas) {
     this.canvas = canvas;
     this._shown = false;
+    this._flipY = false;
   }
 
   show() {
@@ -39,5 +40,14 @@ export default class DisplayController {
     if (height !== undefined && height !== null) {
       this.canvas.style.height = typeof height === 'number' ? `${height}px` : height;
     }
+  }
+
+  set flipY(val) {
+    this._flipY = !!val;
+    this.canvas.style.transform = this._flipY ? 'scaleY(-1)' : '';
+  }
+
+  get flipY() {
+    return this._flipY;
   }
 }

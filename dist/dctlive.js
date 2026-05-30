@@ -21,6 +21,7 @@ var DCTLiveModule = (function (exports) {
       this._magFilter = 'linear';
       this._wrap = 'mask';
       this._fit = 'stretch';
+      this._flipY = false;  // false: flip texture on load (standard orientation), true: no flip on load
 
       this._source = null;
       this._isDynamic = false;
@@ -76,6 +77,11 @@ var DCTLiveModule = (function (exports) {
       this._updateUVTransform();
     }
     get fit() { return this._fit; }
+
+    set flipY(val) {
+      this._flipY = !!val;
+    }
+    get flipY() { return this._flipY; }
 
     // Read-only cached UV transform
     get uvScale() { return this._uvScale; }
@@ -173,6 +179,9 @@ var DCTLiveModule = (function (exports) {
       }
 
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      // flipY=false (default): flip on load (standard image orientation)
+      // flipY=true: don't flip on load (WebGL bottom-left origin)
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !this._flipY ? 1 : 0);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.bindTexture(gl.TEXTURE_2D, null);
     }
@@ -386,7 +395,7 @@ var DCTLiveModule = (function (exports) {
 
   var quadVert = "attribute vec2 position;\r\n\r\nvoid main() {\r\n  gl_Position = vec4(position, 0.0, 1.0);\r\n}\r\n";
 
-  var dctForwardBaseFrag = "/*\n  Forward DCT shader (unified color and Y-only)\n  Computes 1D DCT along one axis (horizontal or vertical).\n  Run twice (horizontal then vertical) for full 2D DCT.\n\n  COLOR_ENABLED define (set at compile time):\n  - 1: color mode (RGB→YCbCr, vec3 accumulation, faster quantization)\n  - 0: Y-only mode (luminance extraction, float accumulation, cheaper inner loop)\n*/\n\n#pragma glslify: rgb2ycbcr = require('./modules/color-conversion.glsl')\n#pragma glslify: extractLuminance = require('./modules/color-extraction.glsl')\n#pragma glslify: quantize = require('./modules/quantization.glsl')\n\n#define PI 3.14159265\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  // Direction vector: (1,0) for horizontal, (0,1) for vertical\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions in pixel space along the processing axis\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n\n  // Origin of the current block (pixel coords, center-sampled)\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n\n  // Actual block size (may be smaller at image edges)\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  // Which frequency coefficient are we computing?\n  float freq = floor(mod(dot(bv, gl_FragCoord.xy), float(blockSize))) / float(bs) * PI;\n\n  // DCT normalization factor: 1/N for DC, 2/N for AC\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  // Accumulate the DCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n\n    // Offset within block to sample i-th pixel\n    vec2 delta = float(i) * bv;\n\n    // DCT basis function: cos((x + 0.5) * freq)\n    float wave = cos((float(i) + 0.5) * freq);\n\n    // Convert pixel coords to UV\n    vec2 uv = (blockOrigin + delta) / resolution;\n\n    // Flip Y on horizontal pass (WebGL texture coords vs image coords)\n    if (!isVert) {\n      uv = vec2(0.0, 1.0) + vec2(1.0, -1.0) * uv;\n    }\n\n    vec4 val = texture2D(inputTexture, uv);\n\n    // Process color or luminance on first (horizontal) pass\n    #if COLOR_ENABLED == 1\n      // Color mode: convert to YCbCr (vec3 accumulation)\n      if (!isVert) {\n        val.rgb = rgb2ycbcr(val.rgb);\n      }\n    #else\n      // Y-only mode: extract luminance only (float accumulation)\n      if (!isVert) {\n        val.x = extractLuminance(val);\n        val.yz = vec2(0.0);\n      }\n    #endif\n\n    sum += wave * factor * val;\n  }\n\n  // Quantization (only after vertical pass = full 2D DCT done)\n  if (isVert) {\n    // Distance from DC component within block (frequency magnitude)\n    float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n\n    // Quantize luminance (Y)\n    float qY = quantizeY + quantizeYf * len;\n    sum.x = qY > 0.0 ? quantize(sum.x, qY) : sum.x;\n\n    #if COLOR_ENABLED == 1\n      // Color mode: quantize Cb, Cr, Alpha\n      float qC = quantizeC + quantizeCf * len;\n      sum.yz = qC > 0.0 ? vec2(quantize(sum.y, qC), quantize(sum.z, qC)) : sum.yz;\n\n      float qA = quantizeA + quantizeAf * len;\n      sum.w = qA > 0.0 ? quantize(sum.w, qA) : sum.w;\n    #endif\n\n    // High frequency boost/cut\n    sum *= 1.0 + len * highFreqMultiplier;\n  }\n\n  gl_FragColor = sum;\n}\n";
+  var dctForwardBaseFrag = "/*\n  Forward DCT shader (unified color and Y-only)\n  Computes 1D DCT along one axis (horizontal or vertical).\n  Run twice (horizontal then vertical) for full 2D DCT.\n\n  COLOR_ENABLED define (set at compile time):\n  - 1: color mode (RGB→YCbCr, vec3 accumulation, faster quantization)\n  - 0: Y-only mode (luminance extraction, float accumulation, cheaper inner loop)\n*/\n\n#pragma glslify: rgb2ycbcr = require('./modules/color-conversion.glsl')\n#pragma glslify: extractLuminance = require('./modules/color-extraction.glsl')\n#pragma glslify: quantize = require('./modules/quantization.glsl')\n\n#define PI 3.14159265\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  // Direction vector: (1,0) for horizontal, (0,1) for vertical\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions in pixel space along the processing axis\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n\n  // Origin of the current block (pixel coords, center-sampled)\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n\n  // Actual block size (may be smaller at image edges)\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  // Which frequency coefficient are we computing?\n  float freq = floor(mod(dot(bv, gl_FragCoord.xy), float(blockSize))) / float(bs) * PI;\n\n  // DCT normalization factor: 1/N for DC, 2/N for AC\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  // Accumulate the DCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n\n    // Offset within block to sample i-th pixel\n    vec2 delta = float(i) * bv;\n\n    // DCT basis function: cos((x + 0.5) * freq)\n    float wave = cos((float(i) + 0.5) * freq);\n\n    // Convert pixel coords to UV\n    vec2 uv = (blockOrigin + delta) / resolution;\n\n    vec4 val = texture2D(inputTexture, uv);\n\n    // Process color or luminance on first (horizontal) pass\n    #if COLOR_ENABLED == 1\n      // Color mode: convert to YCbCr (vec3 accumulation)\n      if (!isVert) {\n        val.rgb = rgb2ycbcr(val.rgb);\n      }\n    #else\n      // Y-only mode: extract luminance only (float accumulation)\n      if (!isVert) {\n        val.x = extractLuminance(val);\n        val.yz = vec2(0.0);\n      }\n    #endif\n\n    sum += wave * factor * val;\n  }\n\n  // Quantization (only after vertical pass = full 2D DCT done)\n  if (isVert) {\n    // Distance from DC component within block (frequency magnitude)\n    float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n\n    // Quantize luminance (Y)\n    float qY = quantizeY + quantizeYf * len;\n    sum.x = qY > 0.0 ? quantize(sum.x, qY) : sum.x;\n\n    #if COLOR_ENABLED == 1\n      // Color mode: quantize Cb, Cr, Alpha\n      float qC = quantizeC + quantizeCf * len;\n      sum.yz = qC > 0.0 ? vec2(quantize(sum.y, qC), quantize(sum.z, qC)) : sum.yz;\n\n      float qA = quantizeA + quantizeAf * len;\n      sum.w = qA > 0.0 ? quantize(sum.w, qA) : sum.w;\n    #endif\n\n    // High frequency boost/cut\n    sum *= 1.0 + len * highFreqMultiplier;\n  }\n\n  gl_FragColor = sum;\n}\n";
 
   var dctInverseBaseFrag = "/*\n  Inverse DCT shader (unified color and Y-only)\n  Reconstructs spatial image from DCT coefficients.\n  Run twice (horizontal then vertical) for full 2D IDCT.\n\n  COLOR_ENABLED define (set at compile time):\n  - 1: color mode (YCbCr→RGB conversion on final pass)\n  - 0: Y-only mode (luminance broadcasted to RGB)\n*/\n\n#pragma glslify: ycbcr2rgb = require('./modules/color-conversion.glsl')\n\n#define PI 3.14159265\n#define PI2 6.28318530\n#define hPI 1.57079632\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nbool validuv(vec2 v) {\n  return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;\n}\n\n// Waveform function (replaceable via JS API)\n// Parameters: angle (phase angle), time (current time in ms), wi (wave input parameter)\nfloat wave(float angle) {\n  return cos(angle);\n}\n\nvoid main() {\n  // Direction vector\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  // Spatial position within block (which pixel are we reconstructing?)\n  float delta = mod(dot(bv, gl_FragCoord.xy), float(blockSize));\n\n  // Accumulate IDCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n\n    float fdelta = float(i);\n\n    // Read DCT coefficient for frequency i\n    vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);\n\n    // IDCT basis function\n    float awave = wave(delta * fdelta / float(bs) * PI);\n\n    sum += awave * val;\n  }\n\n  // On final (vertical) pass, handle color conversion or Y-broadcast\n  if (isVert) {\n    #if COLOR_ENABLED == 1\n      // Color mode: convert YCbCr back to RGB\n      sum.rgb = ycbcr2rgb(sum.rgb);\n    #else\n      // Y-only mode: broadcast luminance to RGB\n      sum = vec4(sum.x, sum.x, sum.x, sum.w);\n    #endif\n  }\n\n  gl_FragColor = sum;\n}\n";
 
@@ -866,6 +875,7 @@ var DCTLiveModule = (function (exports) {
     constructor(canvas) {
       this.canvas = canvas;
       this._shown = false;
+      this._flipY = false;
     }
 
     show() {
@@ -903,6 +913,15 @@ var DCTLiveModule = (function (exports) {
       if (height !== undefined && height !== null) {
         this.canvas.style.height = typeof height === 'number' ? `${height}px` : height;
       }
+    }
+
+    set flipY(val) {
+      this._flipY = !!val;
+      this.canvas.style.transform = this._flipY ? 'scaleY(-1)' : '';
+    }
+
+    get flipY() {
+      return this._flipY;
     }
   }
 
@@ -1088,6 +1107,15 @@ var DCTLiveModule = (function (exports) {
 
     get precision() {
       return this._precision;
+    }
+
+    get flipY() {
+      return this._display.flipY;
+    }
+
+    set flipY(value) {
+      this._display.flipY = value;
+      this.input.flipY = value;
     }
 
     get fps() {
