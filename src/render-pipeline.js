@@ -7,6 +7,7 @@ import {
 import quadVert from './shaders/quad.vert';
 import dctForwardBaseFrag from './shaders/dct-forward-base.frag';
 import dctInverseBaseFrag from './shaders/dct-inverse-base.frag';
+import dctQuantizeFrag from './shaders/dct-quantize.frag';
 import passthroughFrag from './shaders/passthrough.frag';
 import blitClampFrag from './shaders/blit-clamp.frag';
 import blitRepeatFrag from './shaders/blit-repeat.frag';
@@ -61,6 +62,10 @@ export default class RenderPipeline {
 
     this._inverseColorProgram = buildProgramWithDefines(gl, quadVert, dctInverseBaseFrag, { COLOR_ENABLED: 1 });
     this._inverseYOnlyProgram = buildProgramWithDefines(gl, quadVert, dctInverseBaseFrag, { COLOR_ENABLED: 0 });
+
+    // Quantization pass programs (color and Y-only variants)
+    this._quantizeColorProgram = buildProgramWithDefines(gl, quadVert, dctQuantizeFrag, { isColorMode: 1 });
+    this._quantizeYOnlyProgram = buildProgramWithDefines(gl, quadVert, dctQuantizeFrag, { isColorMode: 0 });
 
     // H and V use the same program for float/16-bit — no per-pass encoding needed
     this._activeFwdH = this._forwardColorProgram;
@@ -149,6 +154,11 @@ export default class RenderPipeline {
         }, resolveUniform);
         currentTexture = this._fbDCT.texture;
       }
+
+      // Apply quantization pass after forward DCT
+      const quantizeProgram = this._yOnly ? this._quantizeYOnlyProgram : this._quantizeColorProgram;
+      this._renderQuantize(quantizeProgram, currentTexture, resolveUniform);
+      currentTexture = this._fbQuantized.texture;
     }
 
     if (anyRDCTEnabled) {
@@ -188,12 +198,13 @@ export default class RenderPipeline {
     this._fbInput = createFramebuffer(gl, this.width, this.height, t);
     this._fbTempA = createFramebuffer(gl, this.width, this.height, t);
     this._fbDCT   = createFramebuffer(gl, this.width, this.height, t);
+    this._fbQuantized = createFramebuffer(gl, this.width, this.height, t);
     this._fbTempB = createFramebuffer(gl, this.width, this.height, t);
   }
 
   _resizeFramebuffers() {
     const gl = this.gl;
-    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbQuantized, this._fbTempB]) {
       if (fb) {
         gl.deleteFramebuffer(fb.framebuffer);
         gl.deleteTexture(fb.texture);
@@ -253,16 +264,42 @@ export default class RenderPipeline {
 
     if (isForward) {
       gl.uniform1f(gl.getUniformLocation(program, 'highFreqMultiplier'), resolveUniform('highFreqMultiplier'));
-      gl.uniform1f(gl.getUniformLocation(program, 'quantizeY'),  resolveUniform('quantizeY'));
-      gl.uniform1f(gl.getUniformLocation(program, 'quantizeYf'), resolveUniform('quantizeYf'));
-      gl.uniform1f(gl.getUniformLocation(program, 'quantizeC'),  resolveUniform('quantizeC'));
-      gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
-      gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
-      gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
     } else {
       gl.uniform1f(gl.getUniformLocation(program, 'time'), performance.now());
       gl.uniform1f(gl.getUniformLocation(program, 'wi'), resolveUniform('waveInput'));
     }
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  _renderQuantize(program, inputTexture, resolveUniform) {
+    const gl = this.gl;
+
+    gl.useProgram(program);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbQuantized.framebuffer);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    const posLoc = gl.getAttribLocation(program, 'position');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    gl.uniform2f(gl.getUniformLocation(program, 'resolution'), this.width, this.height);
+    gl.uniform1i(gl.getUniformLocation(program, 'blockSize'), resolveUniform('blockSize'));
+
+    // Quantization uniforms
+    gl.uniform1f(gl.getUniformLocation(program, 'quantizeY'),  resolveUniform('quantizeY'));
+    gl.uniform1f(gl.getUniformLocation(program, 'quantizeYf'), resolveUniform('quantizeYf'));
+    gl.uniform1f(gl.getUniformLocation(program, 'quantizeC'),  resolveUniform('quantizeC'));
+    gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
+    gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
+    gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, inputTexture);
+    gl.uniform1i(gl.getUniformLocation(program, 'inputTexture'), 0);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
@@ -296,12 +333,14 @@ export default class RenderPipeline {
     gl.deleteProgram(this._forwardYOnlyProgram);
     gl.deleteProgram(this._inverseColorProgram);
     gl.deleteProgram(this._inverseYOnlyProgram);
+    gl.deleteProgram(this._quantizeColorProgram);
+    gl.deleteProgram(this._quantizeYOnlyProgram);
     gl.deleteProgram(this._passthroughProgram);
 
     for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
     gl.deleteBuffer(this._quadBuffer);
 
-    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbQuantized, this._fbTempB]) {
       gl.deleteFramebuffer(fb.framebuffer);
       gl.deleteTexture(fb.texture);
     }

@@ -10,7 +10,6 @@
 
 #pragma glslify: rgb2ycbcr = require('./modules/color-conversion.glsl')
 #pragma glslify: extractLuminance = require('./modules/color-extraction.glsl')
-#pragma glslify: quantize = require('./modules/quantization.glsl')
 
 #define PI 3.14159265
 
@@ -22,12 +21,6 @@ uniform int blockSize;
 uniform sampler2D inputTexture;
 
 uniform float highFreqMultiplier;
-uniform float quantizeY;
-uniform float quantizeYf;
-uniform float quantizeC;
-uniform float quantizeCf;
-uniform float quantizeA;
-uniform float quantizeAf;
 
 void main() {
   // Direction vector: (1,0) for horizontal, (0,1) for vertical
@@ -81,25 +74,9 @@ void main() {
     sum += wave * factor * val;
   }
 
-  // Quantization (only after vertical pass = full 2D DCT done)
+  // High frequency boost/cut (after vertical pass = full 2D DCT done)
   if (isVert) {
-    // Distance from DC component within block (frequency magnitude)
     float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));
-
-    // Quantize luminance (Y)
-    float qY = quantizeY + quantizeYf * len;
-    sum.x = qY > 0.0 ? quantize(sum.x, qY) : sum.x;
-
-    #if COLOR_ENABLED == 1
-      // Color mode: quantize Cb, Cr, Alpha
-      float qC = quantizeC + quantizeCf * len;
-      sum.yz = qC > 0.0 ? vec2(quantize(sum.y, qC), quantize(sum.z, qC)) : sum.yz;
-
-      float qA = quantizeA + quantizeAf * len;
-      sum.w = qA > 0.0 ? quantize(sum.w, qA) : sum.w;
-    #endif
-
-    // High frequency boost/cut
     sum *= 1.0 + len * highFreqMultiplier;
   }
 

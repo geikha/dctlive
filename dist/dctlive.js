@@ -395,9 +395,11 @@ var DCTLiveModule = (function (exports) {
 
   var quadVert = "attribute vec2 position;\r\n\r\nvoid main() {\r\n  gl_Position = vec4(position, 0.0, 1.0);\r\n}\r\n";
 
-  var dctForwardBaseFrag = "/*\n  Forward DCT shader (unified color and Y-only)\n  Computes 1D DCT along one axis (horizontal or vertical).\n  Run twice (horizontal then vertical) for full 2D DCT.\n\n  COLOR_ENABLED define (set at compile time):\n  - 1: color mode (RGB→YCbCr, vec3 accumulation, faster quantization)\n  - 0: Y-only mode (luminance extraction, float accumulation, cheaper inner loop)\n*/\n\n#pragma glslify: rgb2ycbcr = require('./modules/color-conversion.glsl')\n#pragma glslify: extractLuminance = require('./modules/color-extraction.glsl')\n#pragma glslify: quantize = require('./modules/quantization.glsl')\n\n#define PI 3.14159265\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  // Direction vector: (1,0) for horizontal, (0,1) for vertical\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions in pixel space along the processing axis\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n\n  // Origin of the current block (pixel coords, center-sampled)\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n\n  // Actual block size (may be smaller at image edges)\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  // Which frequency coefficient are we computing?\n  float freq = floor(mod(dot(bv, gl_FragCoord.xy), float(blockSize))) / float(bs) * PI;\n\n  // DCT normalization factor: 1/N for DC, 2/N for AC\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  // Accumulate the DCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n\n    // Offset within block to sample i-th pixel\n    vec2 delta = float(i) * bv;\n\n    // DCT basis function: cos((x + 0.5) * freq)\n    float wave = cos((float(i) + 0.5) * freq);\n\n    // Convert pixel coords to UV\n    vec2 uv = (blockOrigin + delta) / resolution;\n\n    vec4 val = texture2D(inputTexture, uv);\n\n    // Process color or luminance on first (horizontal) pass\n    #if COLOR_ENABLED == 1\n      // Color mode: convert to YCbCr (vec3 accumulation)\n      if (!isVert) {\n        val.rgb = rgb2ycbcr(val.rgb);\n      }\n    #else\n      // Y-only mode: extract luminance only (float accumulation)\n      if (!isVert) {\n        val.x = extractLuminance(val);\n        val.yz = vec2(0.0);\n      }\n    #endif\n\n    sum += wave * factor * val;\n  }\n\n  // Quantization (only after vertical pass = full 2D DCT done)\n  if (isVert) {\n    // Distance from DC component within block (frequency magnitude)\n    float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n\n    // Quantize luminance (Y)\n    float qY = quantizeY + quantizeYf * len;\n    sum.x = qY > 0.0 ? quantize(sum.x, qY) : sum.x;\n\n    #if COLOR_ENABLED == 1\n      // Color mode: quantize Cb, Cr, Alpha\n      float qC = quantizeC + quantizeCf * len;\n      sum.yz = qC > 0.0 ? vec2(quantize(sum.y, qC), quantize(sum.z, qC)) : sum.yz;\n\n      float qA = quantizeA + quantizeAf * len;\n      sum.w = qA > 0.0 ? quantize(sum.w, qA) : sum.w;\n    #endif\n\n    // High frequency boost/cut\n    sum *= 1.0 + len * highFreqMultiplier;\n  }\n\n  gl_FragColor = sum;\n}\n";
+  var dctForwardBaseFrag = "/*\n  Forward DCT shader (unified color and Y-only)\n  Computes 1D DCT along one axis (horizontal or vertical).\n  Run twice (horizontal then vertical) for full 2D DCT.\n\n  COLOR_ENABLED define (set at compile time):\n  - 1: color mode (RGB→YCbCr, vec3 accumulation, faster quantization)\n  - 0: Y-only mode (luminance extraction, float accumulation, cheaper inner loop)\n*/\n\n#pragma glslify: rgb2ycbcr = require('./modules/color-conversion.glsl')\n#pragma glslify: extractLuminance = require('./modules/color-extraction.glsl')\n\n#define PI 3.14159265\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nuniform float highFreqMultiplier;\n\nvoid main() {\n  // Direction vector: (1,0) for horizontal, (0,1) for vertical\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions in pixel space along the processing axis\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n\n  // Origin of the current block (pixel coords, center-sampled)\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n\n  // Actual block size (may be smaller at image edges)\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  // Which frequency coefficient are we computing?\n  float freq = floor(mod(dot(bv, gl_FragCoord.xy), float(blockSize))) / float(bs) * PI;\n\n  // DCT normalization factor: 1/N for DC, 2/N for AC\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  // Accumulate the DCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n\n    // Offset within block to sample i-th pixel\n    vec2 delta = float(i) * bv;\n\n    // DCT basis function: cos((x + 0.5) * freq)\n    float wave = cos((float(i) + 0.5) * freq);\n\n    // Convert pixel coords to UV\n    vec2 uv = (blockOrigin + delta) / resolution;\n\n    vec4 val = texture2D(inputTexture, uv);\n\n    // Process color or luminance on first (horizontal) pass\n    #if COLOR_ENABLED == 1\n      // Color mode: convert to YCbCr (vec3 accumulation)\n      if (!isVert) {\n        val.rgb = rgb2ycbcr(val.rgb);\n      }\n    #else\n      // Y-only mode: extract luminance only (float accumulation)\n      if (!isVert) {\n        val.x = extractLuminance(val);\n        val.yz = vec2(0.0);\n      }\n    #endif\n\n    sum += wave * factor * val;\n  }\n\n  // High frequency boost/cut (after vertical pass = full 2D DCT done)\n  if (isVert) {\n    float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n    sum *= 1.0 + len * highFreqMultiplier;\n  }\n\n  gl_FragColor = sum;\n}\n";
 
   var dctInverseBaseFrag = "/*\n  Inverse DCT shader (unified color and Y-only)\n  Reconstructs spatial image from DCT coefficients.\n  Run twice (horizontal then vertical) for full 2D IDCT.\n\n  COLOR_ENABLED define (set at compile time):\n  - 1: color mode (YCbCr→RGB conversion on final pass)\n  - 0: Y-only mode (luminance broadcasted to RGB)\n*/\n\n#pragma glslify: ycbcr2rgb = require('./modules/color-conversion.glsl')\n\n#define PI 3.14159265\n#define PI2 6.28318530\n#define hPI 1.57079632\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nbool validuv(vec2 v) {\n  return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;\n}\n\n// Waveform function (replaceable via JS API)\n// Parameters: angle (phase angle), time (current time in ms), wi (wave input parameter)\nfloat wave(float angle) {\n  return cos(angle);\n}\n\nvoid main() {\n  // Direction vector\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  // Spatial position within block (which pixel are we reconstructing?)\n  float delta = mod(dot(bv, gl_FragCoord.xy), float(blockSize));\n\n  // Accumulate IDCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n\n    float fdelta = float(i);\n\n    // Read DCT coefficient for frequency i\n    vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);\n\n    // IDCT basis function\n    float awave = wave(delta * fdelta / float(bs) * PI);\n\n    sum += awave * val;\n  }\n\n  // On final (vertical) pass, handle color conversion or Y-broadcast\n  if (isVert) {\n    #if COLOR_ENABLED == 1\n      // Color mode: convert YCbCr back to RGB\n      sum.rgb = ycbcr2rgb(sum.rgb);\n    #else\n      // Y-only mode: broadcast luminance to RGB\n      sum = vec4(sum.x, sum.x, sum.x, sum.w);\n    #endif\n  }\n\n  gl_FragColor = sum;\n}\n";
+
+  var dctQuantizeFrag = "/*\n  Quantization shader - applies lofi quantization to DCT coefficients\n  Input: raw DCT coefficients (from Forward H or V pass)\n  Output: quantized coefficients ready for inverse\n  Runs between forward and inverse when any DCT pass is enabled\n*/\n\n#pragma glslify: quantize = require('./modules/quantization.glsl')\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\nuniform bool isColorMode;\n\nvoid main() {\n  // Read DCT coefficient at this fragment\n  vec4 coeff = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n\n  // Distance from DC component within block (frequency magnitude)\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n\n  // Quantize luminance (Y) - always present\n  float qY = quantizeY + quantizeYf * len;\n  coeff.x = qY > 0.0 ? quantize(coeff.x, qY) : coeff.x;\n\n  // Quantize chrominance (Cb, Cr) and alpha in color mode\n  if (isColorMode) {\n    float qC = quantizeC + quantizeCf * len;\n    coeff.y = qC > 0.0 ? quantize(coeff.y, qC) : coeff.y;\n    coeff.z = qC > 0.0 ? quantize(coeff.z, qC) : coeff.z;\n\n    float qA = quantizeA + quantizeAf * len;\n    coeff.w = qA > 0.0 ? quantize(coeff.w, qA) : coeff.w;\n  }\n\n  gl_FragColor = coeff;\n}\n";
 
   var passthroughFrag = "precision highp float;\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  gl_FragColor = texture2D(inputTexture, uv);\n}\n";
 
@@ -457,6 +459,10 @@ var DCTLiveModule = (function (exports) {
 
       this._inverseColorProgram = buildProgramWithDefines(gl, quadVert, dctInverseBaseFrag, { COLOR_ENABLED: 1 });
       this._inverseYOnlyProgram = buildProgramWithDefines(gl, quadVert, dctInverseBaseFrag, { COLOR_ENABLED: 0 });
+
+      // Quantization pass programs (color and Y-only variants)
+      this._quantizeColorProgram = buildProgramWithDefines(gl, quadVert, dctQuantizeFrag, { isColorMode: 1 });
+      this._quantizeYOnlyProgram = buildProgramWithDefines(gl, quadVert, dctQuantizeFrag, { isColorMode: 0 });
 
       // H and V use the same program for float/16-bit — no per-pass encoding needed
       this._activeFwdH = this._forwardColorProgram;
@@ -545,6 +551,11 @@ var DCTLiveModule = (function (exports) {
           }, resolveUniform);
           currentTexture = this._fbDCT.texture;
         }
+
+        // Apply quantization pass after forward DCT
+        const quantizeProgram = this._yOnly ? this._quantizeYOnlyProgram : this._quantizeColorProgram;
+        this._renderQuantize(quantizeProgram, currentTexture, resolveUniform);
+        currentTexture = this._fbQuantized.texture;
       }
 
       if (anyRDCTEnabled) {
@@ -584,12 +595,13 @@ var DCTLiveModule = (function (exports) {
       this._fbInput = createFramebuffer(gl, this.width, this.height, t);
       this._fbTempA = createFramebuffer(gl, this.width, this.height, t);
       this._fbDCT   = createFramebuffer(gl, this.width, this.height, t);
+      this._fbQuantized = createFramebuffer(gl, this.width, this.height, t);
       this._fbTempB = createFramebuffer(gl, this.width, this.height, t);
     }
 
     _resizeFramebuffers() {
       const gl = this.gl;
-      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbQuantized, this._fbTempB]) {
         if (fb) {
           gl.deleteFramebuffer(fb.framebuffer);
           gl.deleteTexture(fb.texture);
@@ -649,16 +661,42 @@ var DCTLiveModule = (function (exports) {
 
       if (isForward) {
         gl.uniform1f(gl.getUniformLocation(program, 'highFreqMultiplier'), resolveUniform('highFreqMultiplier'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeY'),  resolveUniform('quantizeY'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeYf'), resolveUniform('quantizeYf'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeC'),  resolveUniform('quantizeC'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
-        gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
       } else {
         gl.uniform1f(gl.getUniformLocation(program, 'time'), performance.now());
         gl.uniform1f(gl.getUniformLocation(program, 'wi'), resolveUniform('waveInput'));
       }
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    _renderQuantize(program, inputTexture, resolveUniform) {
+      const gl = this.gl;
+
+      gl.useProgram(program);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbQuantized.framebuffer);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      const posLoc = gl.getAttribLocation(program, 'position');
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+      gl.uniform2f(gl.getUniformLocation(program, 'resolution'), this.width, this.height);
+      gl.uniform1i(gl.getUniformLocation(program, 'blockSize'), resolveUniform('blockSize'));
+
+      // Quantization uniforms
+      gl.uniform1f(gl.getUniformLocation(program, 'quantizeY'),  resolveUniform('quantizeY'));
+      gl.uniform1f(gl.getUniformLocation(program, 'quantizeYf'), resolveUniform('quantizeYf'));
+      gl.uniform1f(gl.getUniformLocation(program, 'quantizeC'),  resolveUniform('quantizeC'));
+      gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
+      gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
+      gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, inputTexture);
+      gl.uniform1i(gl.getUniformLocation(program, 'inputTexture'), 0);
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -692,12 +730,14 @@ var DCTLiveModule = (function (exports) {
       gl.deleteProgram(this._forwardYOnlyProgram);
       gl.deleteProgram(this._inverseColorProgram);
       gl.deleteProgram(this._inverseYOnlyProgram);
+      gl.deleteProgram(this._quantizeColorProgram);
+      gl.deleteProgram(this._quantizeYOnlyProgram);
       gl.deleteProgram(this._passthroughProgram);
 
       for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
       gl.deleteBuffer(this._quadBuffer);
 
-      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbTempB]) {
+      for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbQuantized, this._fbTempB]) {
         gl.deleteFramebuffer(fb.framebuffer);
         gl.deleteTexture(fb.texture);
       }
