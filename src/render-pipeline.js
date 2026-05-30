@@ -1,13 +1,12 @@
 import {
   buildProgram,
+  buildProgramWithDefines,
   createFramebuffer,
 } from './gl-utils.js';
 
 import quadVert from './shaders/quad.vert';
-import dctForwardFrag from './shaders/dct-forward.frag';
-import dctForwardYFrag from './shaders/dct-forward-y.frag';
-import dctInverseFrag from './shaders/dct-inverse.frag';
-import dctInverseYFrag from './shaders/dct-inverse-y.frag';
+import dctForwardBaseFrag from './shaders/dct-forward-base.frag';
+import dctInverseBaseFrag from './shaders/dct-inverse-base.frag';
 import passthroughFrag from './shaders/passthrough.frag';
 import blitClampFrag from './shaders/blit-clamp.frag';
 import blitRepeatFrag from './shaders/blit-repeat.frag';
@@ -53,14 +52,15 @@ export default class RenderPipeline {
   _buildPrograms() {
     const gl = this.gl;
 
-    this._forwardColorProgram = buildProgram(gl, quadVert, dctForwardFrag);
-    this._forwardYOnlyProgram = buildProgram(gl, quadVert, dctForwardYFrag);
+    // Compile base shaders with COLOR_ENABLED define
+    this._forwardColorProgram = buildProgramWithDefines(gl, quadVert, dctForwardBaseFrag, { COLOR_ENABLED: 1 });
+    this._forwardYOnlyProgram = buildProgramWithDefines(gl, quadVert, dctForwardBaseFrag, { COLOR_ENABLED: 0 });
 
-    this._inverseFragTemplate  = dctInverseFrag;
-    this._inverseYFragTemplate = dctInverseYFrag;
+    this._inverseFragTemplate  = dctInverseBaseFrag;
+    this._inverseYFragTemplate = dctInverseBaseFrag;
 
-    this._inverseColorProgram = buildProgram(gl, quadVert, dctInverseFrag);
-    this._inverseYOnlyProgram = buildProgram(gl, quadVert, dctInverseYFrag);
+    this._inverseColorProgram = buildProgramWithDefines(gl, quadVert, dctInverseBaseFrag, { COLOR_ENABLED: 1 });
+    this._inverseYOnlyProgram = buildProgramWithDefines(gl, quadVert, dctInverseBaseFrag, { COLOR_ENABLED: 0 });
 
     // H and V use the same program for float/16-bit — no per-pass encoding needed
     this._activeFwdH = this._forwardColorProgram;
@@ -78,8 +78,8 @@ export default class RenderPipeline {
     gl.deleteProgram(this._inverseColorProgram);
     gl.deleteProgram(this._inverseYOnlyProgram);
 
-    this._inverseColorProgram = buildProgram(gl, quadVert, colorSource);
-    this._inverseYOnlyProgram = buildProgram(gl, quadVert, yOnlySource);
+    this._inverseColorProgram = buildProgramWithDefines(gl, quadVert, colorSource, { COLOR_ENABLED: 1 });
+    this._inverseYOnlyProgram = buildProgramWithDefines(gl, quadVert, yOnlySource, { COLOR_ENABLED: 0 });
 
     this._activeInvH = this._yOnly ? this._inverseYOnlyProgram : this._inverseColorProgram;
     this._activeInvV = this._activeInvH;
