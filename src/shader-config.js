@@ -9,6 +9,7 @@ const DEFAULT_UNIFORMS = {
   quantizeA: 0.0,
   quantizeAf: 0.0,
   yOnly: false,
+  waveInput: 0.0,
 };
 
 const QUANTIZE_PROPS = new Set(['quantizeY', 'quantizeYf', 'quantizeC', 'quantizeCf', 'quantizeA', 'quantizeAf']);

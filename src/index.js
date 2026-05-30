@@ -88,6 +88,7 @@ export default class DCTLive {
       hfreq: 'highFreqMultiplier',
       blockSize: 'blockSize',
       lpf: 'lpf',
+      waveInput: 'waveInput',
     };
 
     for (const [shorthand, fullName] of Object.entries(shorthandMap)) {
@@ -489,6 +490,28 @@ export default class DCTLive {
    */
   unmount() {
     this._display.unmount();
+  }
+
+  /**
+   * Reset to initial configuration: all uniforms to defaults, wave function to cosine, all passes enabled.
+   */
+  reset() {
+    this._config.uniforms.blockSize = 8;
+    this._config.uniforms.lpf = 128;
+    this._config.uniforms.highFreqMultiplier = 0;
+    this._config.uniforms.quantizeY = 0;
+    this._config.uniforms.quantizeYf = 0;
+    this._config.uniforms.quantizeC = 0;
+    this._config.uniforms.quantizeCf = 0;
+    this._config.uniforms.quantizeA = 0;
+    this._config.uniforms.quantizeAf = 0;
+    this._config.uniforms.waveInput = 0;
+    this.yOnly = false;
+    this.resetWaveFunction();
+    this.dctHorizontal = true;
+    this.dctVertical = true;
+    this.rdctHorizontal = true;
+    this.rdctVertical = true;
   }
 
   /**

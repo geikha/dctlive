@@ -366,9 +366,9 @@ var dctForwardFrag = "/*\r\n  Forward DCT shader (jpeg-cosine)\r\n  Computes 1D 
 
 var dctForwardYFrag = "/*\n  Forward DCT shader - Y-only mode (grayscale)\n  Computes 1D DCT along one axis, luminance channel only.\n  Run twice (horizontal then vertical) for full 2D DCT.\n*/\n\n#define lofi(i,j) floor((i)/(j)+.5)*(j)\n#define PI 3.14159265\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\n\nvoid main() {\n  // Direction vector: (1,0) for horizontal, (0,1) for vertical\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions in pixel space along the processing axis\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n\n  // Origin of the current block (pixel coords, center-sampled)\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n\n  // Actual block size (may be smaller at image edges)\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  // Which frequency coefficient are we computing?\n  float freq = floor(mod(dot(bv, gl_FragCoord.xy), float(blockSize))) / float(bs) * PI;\n\n  // DCT normalization factor: 1/N for DC, 2/N for AC\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  // Accumulate the DCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n\n    // Offset within block to sample i-th pixel\n    vec2 delta = float(i) * bv;\n\n    // DCT basis function: cos((x + 0.5) * freq)\n    float wave = cos((float(i) + 0.5) * freq);\n\n    // Convert pixel coords to UV\n    vec2 uv = (blockOrigin + delta) / resolution;\n\n    // Flip Y on horizontal pass (WebGL texture coords vs image coords)\n    if (!isVert) {\n      uv = vec2(0.0, 1.0) + vec2(1.0, -1.0) * uv;\n    }\n\n    vec4 val = texture2D(inputTexture, uv);\n\n    // Extract luminance on first (horizontal) pass\n    if (!isVert) {\n      val.x = dot(val.rgb, vec3(0.299, 0.587, 0.114));\n      val.yz = vec2(0.0);\n    }\n\n    sum += wave * factor * val;\n  }\n\n  // Quantization (only after vertical pass = full 2D DCT done)\n  if (isVert) {\n    // Distance from DC component within block (frequency magnitude)\n    float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n\n    // Quantize luminance (Y)\n    float qY = quantizeY + quantizeYf * len;\n    sum.x = qY > 0.0 ? lofi(sum.x, qY) : sum.x;\n\n    // High frequency boost/cut\n    sum *= 1.0 + len * highFreqMultiplier;\n  }\n\n  gl_FragColor = sum;\n}\n";
 
-var dctInverseFrag = "/*\r\n  Inverse DCT shader (jpeg-render)\r\n  Reconstructs spatial image from DCT coefficients.\r\n  Run twice (horizontal then vertical) for full 2D IDCT.\r\n*/\r\n\r\n#define PI 3.14159265\r\n#define PI2 6.28318530\r\n#define hPI 1.57079632\r\n\r\nprecision highp float;\r\n\r\nuniform vec2 resolution;\r\nuniform bool isVert;\r\nuniform int blockSize;\r\nuniform sampler2D inputTexture;\r\nuniform float lpf;\r\n\r\nbool validuv(vec2 v) {\r\n  return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;\r\n}\r\n\r\n// YCbCr to RGB conversion\r\nvec3 ycbcr2rgb(vec3 yuv) {\r\n  return vec3(\r\n    yuv.x + 1.402    * yuv.z,\r\n    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,\r\n    yuv.x + 1.772    * yuv.y\r\n  );\r\n}\r\n\r\n// Waveform function (replaceable via JS API)\r\nfloat wave(float angle) {\r\n  return cos(angle);\r\n}\r\n\r\nvoid main() {\r\n  // Direction vector\r\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\r\n\r\n  // Block dimensions\r\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\r\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\r\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\r\n  int loopLimit = int(min(float(bs), lpf));\r\n\r\n  // Spatial position within block (which pixel are we reconstructing?)\r\n  float delta = mod(dot(bv, gl_FragCoord.xy), float(blockSize));\r\n\r\n  // Accumulate IDCT sum\r\n  vec4 sum = vec4(0.0);\r\n  for (int i = 0; i < 1024; i++) {\r\n    if (loopLimit <= i) break;\r\n\r\n    float fdelta = float(i);\r\n\r\n    // Read DCT coefficient for frequency i\r\n    vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);\r\n\r\n    // IDCT basis function\r\n    float awave = wave(delta * fdelta / float(bs) * PI);\r\n\r\n    sum += awave * val;\r\n  }\r\n\r\n  // On final (vertical) pass, convert back to RGB\r\n  if (isVert) {\r\n    sum.rgb = ycbcr2rgb(sum.rgb);\r\n  }\r\n\r\n  gl_FragColor = sum;\r\n}\r\n";
+var dctInverseFrag = "/*\r\n  Inverse DCT shader (jpeg-render)\r\n  Reconstructs spatial image from DCT coefficients.\r\n  Run twice (horizontal then vertical) for full 2D IDCT.\r\n*/\r\n\r\n#define PI 3.14159265\r\n#define PI2 6.28318530\r\n#define hPI 1.57079632\r\n\r\nprecision highp float;\r\n\r\nuniform vec2 resolution;\r\nuniform bool isVert;\r\nuniform int blockSize;\r\nuniform sampler2D inputTexture;\r\nuniform float lpf;\r\nuniform float time;\r\nuniform float wi;\r\n\r\nbool validuv(vec2 v) {\r\n  return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;\r\n}\r\n\r\n// YCbCr to RGB conversion\r\nvec3 ycbcr2rgb(vec3 yuv) {\r\n  return vec3(\r\n    yuv.x + 1.402    * yuv.z,\r\n    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,\r\n    yuv.x + 1.772    * yuv.y\r\n  );\r\n}\r\n\r\n// Waveform function (replaceable via JS API)\r\n// Parameters: angle (phase angle), time (current time in ms), wi (wave input parameter)\r\nfloat wave(float angle) {\r\n  return cos(angle);\r\n}\r\n\r\nvoid main() {\r\n  // Direction vector\r\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\r\n\r\n  // Block dimensions\r\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\r\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\r\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\r\n  int loopLimit = int(min(float(bs), lpf));\r\n\r\n  // Spatial position within block (which pixel are we reconstructing?)\r\n  float delta = mod(dot(bv, gl_FragCoord.xy), float(blockSize));\r\n\r\n  // Accumulate IDCT sum\r\n  vec4 sum = vec4(0.0);\r\n  for (int i = 0; i < 1024; i++) {\r\n    if (loopLimit <= i) break;\r\n\r\n    float fdelta = float(i);\r\n\r\n    // Read DCT coefficient for frequency i\r\n    vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);\r\n\r\n    // IDCT basis function\r\n    float awave = wave(delta * fdelta / float(bs) * PI);\r\n\r\n    sum += awave * val;\r\n  }\r\n\r\n  // On final (vertical) pass, convert back to RGB\r\n  if (isVert) {\r\n    sum.rgb = ycbcr2rgb(sum.rgb);\r\n  }\r\n\r\n  gl_FragColor = sum;\r\n}\r\n";
 
-var dctInverseYFrag = "/*\n  Inverse DCT shader - Y-only mode (grayscale)\n  Reconstructs spatial image from DCT coefficients, luminance channel only.\n  Run twice (horizontal then vertical) for full 2D IDCT.\n*/\n\n#define PI 3.14159265\n#define PI2 6.28318530\n#define hPI 1.57079632\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\n\nbool validuv(vec2 v) {\n  return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;\n}\n\n// Waveform function (replaceable via JS API)\nfloat wave(float angle) {\n  return cos(angle);\n}\n\nvoid main() {\n  // Direction vector\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  // Spatial position within block (which pixel are we reconstructing?)\n  float delta = mod(dot(bv, gl_FragCoord.xy), float(blockSize));\n\n  // Accumulate IDCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n\n    float fdelta = float(i);\n\n    // Read DCT coefficient for frequency i\n    vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);\n\n    // IDCT basis function\n    float awave = wave(delta * fdelta / float(bs) * PI);\n\n    sum += awave * val;\n  }\n\n  // On final (vertical) pass, output luminance as grayscale\n  if (isVert) {\n    sum = vec4(sum.x, sum.x, sum.x, sum.w);\n  }\n\n  gl_FragColor = sum;\n}\n";
+var dctInverseYFrag = "/*\n  Inverse DCT shader - Y-only mode (grayscale)\n  Reconstructs spatial image from DCT coefficients, luminance channel only.\n  Run twice (horizontal then vertical) for full 2D IDCT.\n*/\n\n#define PI 3.14159265\n#define PI2 6.28318530\n#define hPI 1.57079632\n\nprecision highp float;\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nbool validuv(vec2 v) {\n  return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;\n}\n\n// Waveform function (replaceable via JS API)\n// Parameters: angle (phase angle), time (current time in ms), wi (wave input parameter)\nfloat wave(float angle) {\n  return cos(angle);\n}\n\nvoid main() {\n  // Direction vector\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n\n  // Block dimensions\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(gl_FragCoord.xy / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  // Spatial position within block (which pixel are we reconstructing?)\n  float delta = mod(dot(bv, gl_FragCoord.xy), float(blockSize));\n\n  // Accumulate IDCT sum\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n\n    float fdelta = float(i);\n\n    // Read DCT coefficient for frequency i\n    vec4 val = texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution);\n\n    // IDCT basis function\n    float awave = wave(delta * fdelta / float(bs) * PI);\n\n    sum += awave * val;\n  }\n\n  // On final (vertical) pass, output luminance as grayscale\n  if (isVert) {\n    sum = vec4(sum.x, sum.x, sum.x, sum.w);\n  }\n\n  gl_FragColor = sum;\n}\n";
 
 var passthroughFrag = "precision highp float;\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  gl_FragColor = texture2D(inputTexture, uv);\n}\n";
 
@@ -625,6 +625,9 @@ class RenderPipeline {
       gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
       gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
       gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
+    } else {
+      gl.uniform1f(gl.getUniformLocation(program, 'time'), performance.now());
+      gl.uniform1f(gl.getUniformLocation(program, 'wi'), resolveUniform('waveInput'));
     }
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -885,6 +888,7 @@ const DEFAULT_UNIFORMS = {
   quantizeA: 0.0,
   quantizeAf: 0.0,
   yOnly: false,
+  waveInput: 0.0,
 };
 
 const QUANTIZE_PROPS = new Set(['quantizeY', 'quantizeYf', 'quantizeC', 'quantizeCf', 'quantizeA', 'quantizeAf']);
@@ -1023,6 +1027,7 @@ class DCTLive {
       hfreq: 'highFreqMultiplier',
       blockSize: 'blockSize',
       lpf: 'lpf',
+      waveInput: 'waveInput',
     };
 
     for (const [shorthand, fullName] of Object.entries(shorthandMap)) {
@@ -1424,6 +1429,28 @@ class DCTLive {
    */
   unmount() {
     this._display.unmount();
+  }
+
+  /**
+   * Reset to initial configuration: all uniforms to defaults, wave function to cosine, all passes enabled.
+   */
+  reset() {
+    this._config.uniforms.blockSize = 8;
+    this._config.uniforms.lpf = 128;
+    this._config.uniforms.highFreqMultiplier = 0;
+    this._config.uniforms.quantizeY = 0;
+    this._config.uniforms.quantizeYf = 0;
+    this._config.uniforms.quantizeC = 0;
+    this._config.uniforms.quantizeCf = 0;
+    this._config.uniforms.quantizeA = 0;
+    this._config.uniforms.quantizeAf = 0;
+    this._config.uniforms.waveInput = 0;
+    this.yOnly = false;
+    this.resetWaveFunction();
+    this.dctHorizontal = true;
+    this.dctVertical = true;
+    this.rdctHorizontal = true;
+    this.rdctVertical = true;
   }
 
   /**

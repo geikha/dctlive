@@ -109,6 +109,39 @@ dct.setDCT(true, false);    // Only horizontal
 dct.setRDCT(false, true);   // Only vertical inverse
 ```
 
+## Custom Wave Functions
+
+Replace the IDCT wave function. Change the rendering to waves other than cosines:
+
+```js
+// Basic sine wave
+dct.setWaveFunction('return sin(angle);');
+
+// Moving cosines
+dct.setWaveFunction('return cos(angle + time * 0.001);');
+
+// User-controlled Exponent
+dct.setWaveFunction('return pow(cos(angle),wi);');
+
+// Reset to default
+dct.resetWaveFunction();
+```
+
+### Available Parameters
+
+Inside the wave function GLSL code, three parameters are available:
+
+- **`angle`** (float) — Phase angle of the current frequency basis (radiants)
+- **`time`** (float) — Current time in milliseconds from `performance.now()`, updates each frame
+- **`wi`** (float) — User-controlled wave input parameter (default 0, range -∞ to ∞)
+
+### Setting Wave Input
+
+```js
+// Set the wave input parameter (available via `wi` in wave function)
+dct.waveInput = 2.5;
+```
+
 ## Full API
 
 ### Constructor
@@ -148,6 +181,7 @@ new DCTLive({
 - `setUniforms(obj)` — Multiple uniforms
 - `setWaveFunction(glsl)` — Replace IDCT wave function
 - `resetWaveFunction()` — Restore default
+- `reset()` — Reset all uniforms, wave function, and passes to defaults
 
 ### Properties (Shorthand)
 ```js

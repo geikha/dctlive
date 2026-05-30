@@ -259,6 +259,9 @@ export default class RenderPipeline {
       gl.uniform1f(gl.getUniformLocation(program, 'quantizeCf'), resolveUniform('quantizeCf'));
       gl.uniform1f(gl.getUniformLocation(program, 'quantizeA'),  resolveUniform('quantizeA'));
       gl.uniform1f(gl.getUniformLocation(program, 'quantizeAf'), resolveUniform('quantizeAf'));
+    } else {
+      gl.uniform1f(gl.getUniformLocation(program, 'time'), performance.now());
+      gl.uniform1f(gl.getUniformLocation(program, 'wi'), resolveUniform('waveInput'));
     }
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

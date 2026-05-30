@@ -15,6 +15,8 @@ uniform bool isVert;
 uniform int blockSize;
 uniform sampler2D inputTexture;
 uniform float lpf;
+uniform float time;
+uniform float wi;
 
 bool validuv(vec2 v) {
   return 0.0 < v.x && v.x < 1.0 && 0.0 < v.y && v.y < 1.0;
@@ -30,6 +32,7 @@ vec3 ycbcr2rgb(vec3 yuv) {
 }
 
 // Waveform function (replaceable via JS API)
+// Parameters: angle (phase angle), time (current time in ms), wi (wave input parameter)
 float wave(float angle) {
   return cos(angle);
 }
