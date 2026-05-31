@@ -1,10 +1,4 @@
 /**
- * WebGL helper utilities for DCTLive.
- * Handles shader compilation, program linking, framebuffer creation,
- * and uniform/attribute helpers.
- */
-
-/**
  * Compile a WebGL shader from source.
  * @param {WebGLRenderingContext} gl
  * @param {number} type - gl.VERTEX_SHADER or gl.FRAGMENT_SHADER
@@ -56,26 +50,6 @@ export function buildProgram(gl, vertSrc, fragSrc) {
   return createProgram(gl, vert, frag);
 }
 
-/**
- * Build a program with preprocessor defines injected into the fragment shader.
- * @param {WebGLRenderingContext} gl
- * @param {string} vertSrc
- * @param {string} fragSrc
- * @param {Object} defines - e.g. { COLOR_ENABLED: 1, SOME_FLAG: 0 }
- * @returns {WebGLProgram}
- */
-export function buildProgramWithDefines(gl, vertSrc, fragSrc, defines) {
-  // Inject #define statements at the beginning of fragment shader
-  let defineStr = '';
-  for (const [key, value] of Object.entries(defines)) {
-    defineStr += `#define ${key} ${value}\n`;
-  }
-  const fragWithDefines = defineStr + fragSrc;
-
-  const vert = compileShader(gl, gl.VERTEX_SHADER, vertSrc);
-  const frag = compileShader(gl, gl.FRAGMENT_SHADER, fragWithDefines);
-  return createProgram(gl, vert, frag);
-}
 
 /**
  * Create a framebuffer with the given texture type.
@@ -133,8 +107,6 @@ export function resolveTexType(gl, requested = '16bit') {
   }
   return { type: gl.UNSIGNED_BYTE, actual: '8bit' };
 }
-
-export const createFloatFramebuffer = (gl, w, h) => createFramebuffer(gl, w, h, gl.FLOAT);
 
 /**
  * Create a texture from an HTMLImageElement.

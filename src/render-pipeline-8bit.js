@@ -1,189 +1,109 @@
-import { buildProgram, buildProgramWithDefines } from './gl-utils.js';
+import { buildProgram } from './gl-utils.js';
 import RenderPipeline, { DEFAULT_WAVE_BODY, buildInverseSource } from './render-pipeline.js';
 
 import quadVert from './shaders/quad.vert';
-import dctForwardBaseFrag from './shaders/dct-forward-base.frag';
-import dctInverseBaseFrag from './shaders/dct-inverse-base.frag';
-import dctQuantizeFrag from './shaders/dct-quantize.frag';
 
-// 8-bit RGBM encoding.
+// 8-bit precision pipeline using RGBM (color) and YM (Y-only) encoding.
 //
-// PROBLEM
-// Each color channel gets 256 possible values. The DCT math produces numbers
-// outside that range. We need a way to squeeze them into 0-255.
+// DCT coefficients range beyond 0-1. This pipeline stores them in 8-bit RGBA
+// textures using two complementary techniques:
 //
-// SOLUTION: Two ideas working together
+// COMPANDING (sqrt): more precision near zero, less near the extremes.
+//   Encode: c = sign(x) * sqrt(|x|)    Decode: x = c * |c|
 //
-// 1. COMPANDING
-//    Idea: Don't spread precision evenly. Instead, give more detail to small
-//    numbers (where we need it) and less detail to large numbers.
-//    Method: Use sqrt() — it naturally squeezes large numbers closer together.
-//    During encode: c = sqrt(n)  →  small numbers spread far apart, large cluster
-//    During decode: n = c²       →  expand back to original (one multiply)
+// RGBM (color mode): scale factor in alpha channel. All three channels
+// normalized to their max value, so 0-255 is used regardless of magnitude.
 //
-// 2. RGBM (RGB + Multiplier)
-//    Each pixel stores its own scale (its biggest RGB value) in alpha.
-//    All three RGB values in that pixel scale relative to that value, always
-//    using the full 0–255 range regardless of magnitude.
-//    RGBM_MAX is the assumed upper bound for any coefficient. Values above
-//    it get clamped. Values below it are encoded with full precision.
-//    The DCT applies a normalization factor (2/blockSize) to prevent larger
-//    blocks from producing larger coefficients. So RGBM_MAX can stay the same
-//    regardless of blockSize.
+// YM (Y-only mode): same idea, scalar. R = companded value, G = scale factor.
 //
-// THE PIPELINE
-// Four stages, each a separate shader program. Each stage decodes input (if needed),
-// does its math, then re-encodes for the next stage:
-//   1. fwdH   input → compress to 8-bit
-//   2. fwdV   decompress → apply quantization → compress to 8-bit
-//   3. invH   decompress → inverse transform → compress to 8-bit
-//   4. invV   decompress → inverse transform → output (no compression needed)
+// RGBM_MAX = 4.0 is the assumed coefficient ceiling — values above it clamp.
+// The DCT normalization factor (2/blockSize) keeps coefficients in range
+// independent of block size, so RGBM_MAX is stable.
+//
+// Unlike the float pipeline, color-in and color-out differ between color/Y-only
+// modes (different codec), so setYOnly() swaps all four active programs.
 
-// Upper bound assumed for DCT coefficient magnitude. Coefficients above this get
-// clamped. Lower values = more precision for small coefficients, less headroom for large ones.
-const RGBM_MAX = 4.0;
-
-const RGBM_ENCODE =
-  `float mv = max(max(abs(sum.x), abs(sum.y)), abs(sum.z)); ` +
-  `mv = clamp(mv, 0.01, ${RGBM_MAX.toFixed(1)}); ` +
-  'vec3 nrm = sum.xyz / mv; ' +
-  'gl_FragColor.xyz = (sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5; ' +
-  `gl_FragColor.w = sqrt(mv / ${RGBM_MAX.toFixed(1)});`;
-
-function rgbmDecode(sampleExpr) {
-  return (
-    `vec4 texVal = ${sampleExpr}; ` +
-    `float mv = texVal.w * texVal.w * ${RGBM_MAX.toFixed(1)}; ` +
-    'vec3 cmp = texVal.xyz * 2.0 - 1.0; ' +
-    'vec4 val = vec4((cmp * abs(cmp)) * mv, 1.0);'
-  );
-}
-
-function buildFwdH(src) {
-  return src.replace(/gl_FragColor\s*=\s*sum;/, RGBM_ENCODE);
-}
-
-function buildFwdV(src) {
-  return src
-    .replace(/vec4 val = texture2D\(inputTexture, uv\);/, rgbmDecode('texture2D(inputTexture, uv)'))
-    .replace(/gl_FragColor\s*=\s*sum;/, RGBM_ENCODE);
-}
-
-function buildInvH(src) {
-  return src
-    .replace(
-      /vec4 val = texture2D\(inputTexture, \(blockOrigin \+ bv \* fdelta\) \/ resolution\);/,
-      rgbmDecode('texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution)')
-    )
-    .replace(/gl_FragColor\s*=\s*sum;/, RGBM_ENCODE);
-}
-
-function buildInvV(src) {
-  return src
-    .replace(
-      /vec4 val = texture2D\(inputTexture, \(blockOrigin \+ bv \* fdelta\) \/ resolution\);/,
-      rgbmDecode('texture2D(inputTexture, (blockOrigin + bv * fdelta) / resolution)')
-    )
-    .replace(/gl_FragColor\s*=\s*sum;/, 'gl_FragColor = clamp(sum, 0.0, 1.0); gl_FragColor.a = 1.0;');
-}
-
-function buildQuantize8bit(src) {
-  // Quantize pass needs RGBM decode on input and encode on output
-  return src
-    .replace(/vec4 coeff = texture2D\(inputTexture, gl_FragCoord\.xy \/ resolution\);/,
-      rgbmDecode('texture2D(inputTexture, gl_FragCoord.xy / resolution)'))
-    .replace(/gl_FragColor = coeff;/, RGBM_ENCODE);
-}
+import fwdColor      from './shaders/8bit/forward-color.frag';
+import fwdY          from './shaders/8bit/forward-y.frag';
+import invColor      from './shaders/8bit/inverse-color.frag';
+import invY          from './shaders/8bit/inverse-y.frag';
+import quantColor    from './shaders/8bit/quantize-color.frag';
+import quantY        from './shaders/8bit/quantize-y.frag';
+import colorInColor  from './shaders/8bit/color-in-color.frag';
+import colorInY      from './shaders/8bit/color-in-y.frag';
+import colorOutColor from './shaders/8bit/color-out-color.frag';
+import colorOutY     from './shaders/8bit/color-out-y.frag';
 
 export default class RenderPipeline8bit extends RenderPipeline {
   _buildPrograms() {
     const gl = this.gl;
 
-    // Precompute injected forward sources (static — no wave replacement needed)
-    // Use buildProgramWithDefines to inject COLOR_ENABLED, then apply RGBM encoding
-    const fwdColorBase_H = buildFwdH('#define COLOR_ENABLED 1\n' + dctForwardBaseFrag);
-    const fwdColorBase_V = buildFwdV('#define COLOR_ENABLED 1\n' + dctForwardBaseFrag);
-    const fwdYBase_H     = buildFwdH('#define COLOR_ENABLED 0\n' + dctForwardBaseFrag);
-    const fwdYBase_V     = buildFwdV('#define COLOR_ENABLED 0\n' + dctForwardBaseFrag);
+    // Color-in and color-out differ per mode — stored separately, swapped by setYOnly()
+    this._colorInColorProgram  = buildProgram(gl, quadVert, colorInColor);
+    this._colorInYProgram      = buildProgram(gl, quadVert, colorInY);
+    this._colorOutColorProgram = buildProgram(gl, quadVert, colorOutColor);
+    this._colorOutYProgram     = buildProgram(gl, quadVert, colorOutY);
 
-    // Precompute injected inverse templates (wave replacement operates on these)
-    const invColorBase_H = buildInvH('#define COLOR_ENABLED 1\n' + dctInverseBaseFrag);
-    const invColorBase_V = buildInvV('#define COLOR_ENABLED 1\n' + dctInverseBaseFrag);
-    const invYBase_H     = buildInvH('#define COLOR_ENABLED 0\n' + dctInverseBaseFrag);
-    const invYBase_V     = buildInvV('#define COLOR_ENABLED 0\n' + dctInverseBaseFrag);
+    // Active color-in/out start in color mode (matches base class default)
+    this._colorInProgram  = this._colorInColorProgram;
+    this._colorOutProgram = this._colorOutColorProgram;
 
-    this._invColorH_tpl = invColorBase_H;
-    this._invColorV_tpl = invColorBase_V;
-    this._invYH_tpl     = invYBase_H;
-    this._invYV_tpl     = invYBase_V;
+    this._forwardColorProgram = buildProgram(gl, quadVert, fwdColor);
+    this._forwardYOnlyProgram = buildProgram(gl, quadVert, fwdY);
 
-    // Quantization pass with RGBM encoding
-    const quantizeColorBase = buildQuantize8bit('#define isColorMode 1\n' + dctQuantizeFrag);
-    const quantizeYBase     = buildQuantize8bit('#define isColorMode 0\n' + dctQuantizeFrag);
-    this._quantizeColorProgram = buildProgram(gl, quadVert, quantizeColorBase);
-    this._quantizeYOnlyProgram = buildProgram(gl, quadVert, quantizeYBase);
+    // Store templates so setWaveFunction() can patch and recompile inverse shaders
+    this._inverseFragTemplate  = invColor;
+    this._inverseYFragTemplate = invY;
 
-    // Build forward programs
-    this._fwdColorH = buildProgram(gl, quadVert, fwdColorBase_H);
-    this._fwdColorV = buildProgram(gl, quadVert, fwdColorBase_V);
-    this._fwdYH     = buildProgram(gl, quadVert, fwdYBase_H);
-    this._fwdYV     = buildProgram(gl, quadVert, fwdYBase_V);
+    this._inverseColorProgram = buildProgram(gl, quadVert, buildInverseSource(invColor, DEFAULT_WAVE_BODY));
+    this._inverseYOnlyProgram = buildProgram(gl, quadVert, buildInverseSource(invY, DEFAULT_WAVE_BODY));
 
-    // Build inverse programs
-    this._invColorH = buildProgram(gl, quadVert, buildInverseSource(this._invColorH_tpl, DEFAULT_WAVE_BODY));
-    this._invColorV = buildProgram(gl, quadVert, buildInverseSource(this._invColorV_tpl, DEFAULT_WAVE_BODY));
-    this._invYH     = buildProgram(gl, quadVert, buildInverseSource(this._invYH_tpl, DEFAULT_WAVE_BODY));
-    this._invYV     = buildProgram(gl, quadVert, buildInverseSource(this._invYV_tpl, DEFAULT_WAVE_BODY));
+    this._quantizeColorProgram = buildProgram(gl, quadVert, quantColor);
+    this._quantizeYOnlyProgram = buildProgram(gl, quadVert, quantY);
 
-    this._activeFwdH = this._fwdColorH;
-    this._activeFwdV = this._fwdColorV;
-    this._activeInvH = this._invColorH;
-    this._activeInvV = this._invColorV;
+    // H and V share one program — isVert uniform drives direction (same as float pipeline)
+    this._activeFwd = this._forwardColorProgram;
+    this._activeInv = this._inverseColorProgram;
   }
 
   setWaveFunction(glslBody) {
-    const gl = this.gl;
+    // Normalize to single line: collapse whitespace and newlines to prevent multiline define syntax.
+    const normalized = glslBody.trim().replace(/\s+/g, ' ');
+    this._deletePrograms(this._inverseColorProgram, this._inverseYOnlyProgram);
 
-    gl.deleteProgram(this._invColorH);
-    gl.deleteProgram(this._invColorV);
-    gl.deleteProgram(this._invYH);
-    gl.deleteProgram(this._invYV);
+    this._inverseColorProgram = buildProgram(this.gl, quadVert, buildInverseSource(this._inverseFragTemplate, normalized));
+    this._inverseYOnlyProgram = buildProgram(this.gl, quadVert, buildInverseSource(this._inverseYFragTemplate, normalized));
 
-    this._invColorH = buildProgram(gl, quadVert, buildInverseSource(this._invColorH_tpl, glslBody));
-    this._invColorV = buildProgram(gl, quadVert, buildInverseSource(this._invColorV_tpl, glslBody));
-    this._invYH     = buildProgram(gl, quadVert, buildInverseSource(this._invYH_tpl, glslBody));
-    this._invYV     = buildProgram(gl, quadVert, buildInverseSource(this._invYV_tpl, glslBody));
-
-    this._activeInvH = this._yOnly ? this._invYH : this._invColorH;
-    this._activeInvV = this._yOnly ? this._invYV : this._invColorV;
-
-    this._waveBody = glslBody;
+    this._activeInv = this._yOnly ? this._inverseYOnlyProgram : this._inverseColorProgram;
+    this._waveBody = normalized;
   }
 
   setYOnly(enabled) {
     this._yOnly = enabled;
-    this._activeFwdH = enabled ? this._fwdYH : this._fwdColorH;
-    this._activeFwdV = enabled ? this._fwdYV : this._fwdColorV;
-    this._activeInvH = enabled ? this._invYH : this._invColorH;
-    this._activeInvV = enabled ? this._invYV : this._invColorV;
+
+    // Swap color-in/out to match codec (RGBM ↔ YM)
+    this._colorInProgram  = enabled ? this._colorInYProgram      : this._colorInColorProgram;
+    this._colorOutProgram = enabled ? this._colorOutYProgram     : this._colorOutColorProgram;
+
+    this._activeFwd = enabled ? this._forwardYOnlyProgram : this._forwardColorProgram;
+    this._activeInv = enabled ? this._inverseYOnlyProgram : this._inverseColorProgram;
   }
 
   destroy() {
-    const gl = this.gl;
-
-    for (const prog of [
-      this._fwdColorH, this._fwdColorV, this._fwdYH, this._fwdYV,
-      this._invColorH, this._invColorV, this._invYH, this._invYV,
+    this._deletePrograms(
+      this._colorInColorProgram, this._colorInYProgram,
+      this._colorOutColorProgram, this._colorOutYProgram,
+      this._forwardColorProgram, this._forwardYOnlyProgram,
+      this._inverseColorProgram, this._inverseYOnlyProgram,
       this._quantizeColorProgram, this._quantizeYOnlyProgram,
-    ]) gl.deleteProgram(prog);
+      this._passthroughProgram,
+    );
+    for (const prog of Object.values(this._blitPrograms)) this._deletePrograms(prog);
+    this.gl.deleteBuffer(this._quadBuffer);
 
-    gl.deleteProgram(this._passthroughProgram);
-    for (const prog of Object.values(this._blitPrograms)) gl.deleteProgram(prog);
-    gl.deleteBuffer(this._quadBuffer);
-
-    for (const fb of [this._fbInput, this._fbTempA, this._fbDCT, this._fbQuantized, this._fbTempB]) {
-      gl.deleteFramebuffer(fb.framebuffer);
-      gl.deleteTexture(fb.texture);
+    for (const fb of [this._fbInput, this._fbColorIn, this._fbTempA, this._fbDCT, this._fbQuantized, this._fbTempB]) {
+      this.gl.deleteFramebuffer(fb.framebuffer);
+      this.gl.deleteTexture(fb.texture);
     }
   }
 }

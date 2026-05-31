@@ -18,7 +18,10 @@ export default class InputSource {
     this._magFilter = 'linear';
     this._wrap = 'mask';
     this._fit = 'stretch';
-    this._flipY = false;  // false: flip texture on load (standard orientation), true: no flip on load
+    // flipY=true (default): flip texture on upload so top of image = top of screen.
+    // flipY=false: raw WebGL orientation (bottom-up). Use when the source is already
+    // in WebGL coordinate space or when compensating with a CSS scaleY(-1) transform.
+    this._flipY = true;
 
     this._source = null;
     this._isDynamic = false;
@@ -83,6 +86,10 @@ export default class InputSource {
   // Read-only cached UV transform
   get uvScale() { return this._uvScale; }
   get uvOffset() { return this._uvOffset; }
+
+  // Source dimensions
+  get sourceWidth() { return this._sourceWidth; }
+  get sourceHeight() { return this._sourceHeight; }
 
   // Only 'fit' can produce out-of-bounds UVs; stretch/fill always stay in [0,1]
   get effectiveWrap() { return this._fit === 'fit' ? this._wrap : 'clamp'; }
@@ -176,9 +183,7 @@ export default class InputSource {
     }
 
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    // flipY=false (default): flip on load (standard image orientation)
-    // flipY=true: don't flip on load (WebGL bottom-left origin)
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !this._flipY ? 1 : 0);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, this._flipY ? 1 : 0);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.bindTexture(gl.TEXTURE_2D, null);
   }

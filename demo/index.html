@@ -537,6 +537,10 @@
           <input type="number" id="ctrl-height" value="512" min="1" style="flex: 1; min-width: 0;" />
         </div>
       </div>
+      <div class="row">
+        <button id="btn-input-aspect">input aspect</button>
+        <button id="btn-input-size">input size</button>
+      </div>
       <div class="ctrl-row first-slider">
         <span class="lbl">fps</span>
         <input type="range" id="ctrl-fps" min="0" max="60" step="1" value="0" />
@@ -554,6 +558,9 @@
       <div class="check-row">
         <label><input type="checkbox" id="ctrl-rdctH" checked /> inverse h</label>
         <label><input type="checkbox" id="ctrl-rdctV" checked /> inverse v</label>
+      </div>
+      <div class="check-row">
+        <label><input type="checkbox" id="ctrl-flipY" checked /> flip y</label>
       </div>
     </div>
 
@@ -792,6 +799,46 @@
     document.getElementById('ctrl-width').addEventListener('change', applyResolution);
     document.getElementById('ctrl-height').addEventListener('change', applyResolution);
 
+    // ---- Input aspect/size buttons ----
+
+    document.getElementById('btn-input-aspect').addEventListener('click', () => {
+      if (!dct.input.texture) {
+        setStatus('no input loaded');
+        return;
+      }
+      const inputW = dct.input.sourceWidth;
+      const inputH = dct.input.sourceHeight;
+      if (!inputW || !inputH) {
+        setStatus('no input source');
+        return;
+      }
+      // Maintain current height, adapt width to input aspect ratio
+      const aspect = inputW / inputH;
+      const currentH = parseInt(document.getElementById('ctrl-height').value, 10);
+      const newW = Math.round(currentH * aspect);
+
+      document.getElementById('ctrl-width').value = newW;
+      document.getElementById('ctrl-height').value = currentH;
+      applyResolution();
+    });
+
+    document.getElementById('btn-input-size').addEventListener('click', () => {
+      if (!dct.input.texture) {
+        setStatus('no input loaded');
+        return;
+      }
+      const inputW = dct.input.sourceWidth;
+      const inputH = dct.input.sourceHeight;
+      if (!inputW || !inputH) {
+        setStatus('no input source');
+        return;
+      }
+
+      document.getElementById('ctrl-width').value = inputW;
+      document.getElementById('ctrl-height').value = inputH;
+      applyResolution();
+    });
+
     document.getElementById('ctrl-fps').addEventListener('input', (e) => {
       const fps = parseInt(e.target.value, 10);
       dct.fps = fps;
@@ -806,12 +853,19 @@
       const rdctH = document.getElementById('ctrl-rdctH').checked;
       const rdctV = document.getElementById('ctrl-rdctV').checked;
       dct.setDCT(dctH, dctV);
-      dct.setRDCT(rdctH, rdctV);
+      dct.setIDCT(rdctH, rdctV);
       if (!dct._looping) dct.run();
     }
 
     ['ctrl-dctH', 'ctrl-dctV', 'ctrl-rdctH', 'ctrl-rdctV'].forEach((id) => {
       document.getElementById(id).addEventListener('change', updateDCTPasses);
+    });
+
+    // ---- FlipY toggle ----
+
+    document.getElementById('ctrl-flipY').addEventListener('change', (e) => {
+      dct.flipY = e.target.checked;
+      if (!dct._looping) dct.run();
     });
 
     // ---- Y-only mode ----
@@ -830,12 +884,34 @@
     ];
 
     TRANSFORM_CTRLS.forEach(({ id, uniform, val, isInt }) => {
-      document.getElementById(id).addEventListener('input', (e) => {
+      const slider = document.getElementById(id);
+      slider.addEventListener('input', (e) => {
         const v = isInt ? parseInt(e.target.value) : parseFloat(e.target.value);
         dct.setUniform(uniform, v);
         document.getElementById(val).textContent = isInt ? v : v.toFixed(2);
         if (!dct._looping) dct.run();
       });
+    });
+
+    // ---- Mousewheel fine adjustments ----
+
+    function attachWheelListener(sliderId) {
+      const slider = document.getElementById(sliderId);
+      if (!slider) return;
+      slider.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const step = parseFloat(slider.step) || 1;
+        const direction = e.deltaY > 0 ? -1 : 1;
+        let newVal = parseFloat(slider.value) + (step * direction);
+        newVal = Math.max(parseFloat(slider.min), Math.min(parseFloat(slider.max), newVal));
+        slider.value = newVal;
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      }, { passive: false });
+    }
+
+    // Attach to all sliders
+    document.querySelectorAll('input[type="range"]').forEach((slider) => {
+      if (slider.id) attachWheelListener(slider.id);
     });
 
     // ---- Quantization (including frequency-dependent) ----
@@ -894,6 +970,46 @@
       dct.resetWaveFunction();
       document.getElementById('wave-input').value = DEFAULT_WAVE;
       if (!dct._looping) dct.run();
+    });
+
+    // ---- Drag and drop ----
+
+    const canvasArea = document.getElementById('canvas-area');
+
+    canvasArea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      canvasArea.style.backgroundColor = 'rgba(195, 255, 32, 0.1)';
+    });
+
+    canvasArea.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      canvasArea.style.backgroundColor = '';
+    });
+
+    canvasArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      canvasArea.style.backgroundColor = '';
+
+      const files = e.dataTransfer.files;
+      if (!files || files.length === 0) return;
+
+      const file = files[0];
+      setStatus('loading...');
+      const url = URL.createObjectURL(file);
+      const isVideo = file.type && file.type.startsWith('video/');
+
+      if (isVideo) {
+        dct.initVideo(url).then(() => setStatus(file.name)).catch((err) => {
+          setStatus('error: ' + (err.message || 'failed'));
+        });
+      } else {
+        dct.initImage(url).then(() => setStatus(file.name)).catch((err) => {
+          setStatus('error: ' + (err.message || 'failed'));
+        });
+      }
     });
   }
 

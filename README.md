@@ -89,7 +89,20 @@ dct.setResolution(1024, 1024);
 dct.input.fit = 'stretch';  // Default
 dct.input.fit = 'fit';      // Letterbox
 dct.input.fit = 'fill';     // Crop
+
+// Flip image orientation (both input and output)
+dct.flipY = true;   // Default: standard top-down orientation (UNPACK_FLIP_Y enabled)
+dct.flipY = false;  // Raw WebGL bottom-up orientation
 ```
+
+### flipY Behavior
+
+The `flipY` property controls whether the input texture is flipped on upload:
+
+- **`flipY = true` (default)**: `UNPACK_FLIP_Y_WEBGL` is enabled — images load in standard top-down orientation as shown in most image viewers.
+- **`flipY = false`**: No flip on upload — raw WebGL bottom-up coordinates. Also applies a CSS `scaleY(-1)` to the canvas output to compensate visually.
+
+Both modes produce identical DCT results; this is purely a coordinate-system choice.
 
 ## DCT/IDCT Control
 
@@ -101,13 +114,15 @@ dct.dctHorizontal = true;
 dct.dctVertical = true;
 
 // Inverse DCT (frequency → spatial domain)
-dct.rdctHorizontal = true;
-dct.rdctVertical = true;
+dct.idctHorizontal = true;
+dct.idctVertical = true;
 
 // Or use setters
-dct.setDCT(true, false);    // Only horizontal
-dct.setRDCT(false, true);   // Only vertical inverse
+dct.setDCT(true, false);    // Only horizontal forward DCT
+dct.setIDCT(false, true);   // Only vertical inverse DCT
 ```
+
+Disabling the forward DCT (`setDCT(false)`) lets you feed any image directly into the IDCT as raw spectral data — useful for treating pixel values as coefficients. Disabling the inverse DCT (`setIDCT(false)`) lets you visualise the raw DCT coefficients without reconstruction.
 
 ## Custom Wave Functions
 
@@ -117,8 +132,8 @@ Replace the IDCT wave function. Change the rendering to waves other than cosines
 // Basic sine wave
 dct.setWaveFunction('return sin(angle);');
 
-// Moving cosines
-dct.setWaveFunction('return cos(angle + time * 0.001);');
+// Moving cosines (time is in seconds)
+dct.setWaveFunction('return cos(angle + time * 2.0);');
 
 // User-controlled Exponent
 dct.setWaveFunction('return pow(cos(angle),wi);');
@@ -132,7 +147,7 @@ dct.resetWaveFunction();
 Inside the wave function GLSL code, three parameters are available:
 
 - **`angle`** (float) — Phase angle of the current frequency basis (radiants)
-- **`time`** (float) — Current time in milliseconds from `performance.now()`, updates each frame
+- **`time`** (float) — Current time in seconds from `performance.now() / 1000`, updates each frame
 - **`wi`** (float) — User-controlled wave input parameter (default 0, range -∞ to ∞)
 
 ### Setting Wave Input
@@ -172,11 +187,12 @@ new DCTLive({
 - `unmount()` — Remove from DOM
 - `resizeCanvas(w, h)` — Display size
 - `setResolution(w, h)` — Render resolution
+- `flipY` — Get/set image orientation (bool)
 
 ### Configuration
 - `setFPS(fps)` — Frame rate
 - `setDCT(h, v)` — Forward DCT passes
-- `setRDCT(h, v)` — Inverse DCT passes
+- `setIDCT(h, v)` — Inverse DCT passes
 - `setUniform(name, val)` — Single uniform
 - `setUniforms(obj)` — Multiple uniforms
 - `setWaveFunction(glsl)` — Replace IDCT wave function
@@ -193,6 +209,8 @@ dct.qY, dct.qC          // Luminance, chrominance quantization (0–1, power cur
 dct.qYf, dct.qCf        // Frequency-dependent quantization (0–1)
 dct.qA, dct.qAf         // Alpha quantization (0–1)
 dct.yOnly               // Drop color channels (bool)
+
+dct.flipY               // Flip image orientation (bool, default true)
 
 dct.input.fit           // 'fit' | 'fill' | 'stretch'
 dct.input.filter        // 'linear' | 'nearest' — sets both mag and min
@@ -251,7 +269,6 @@ For testing, use the query string:
 ?precision=16bit   // Force 16-bit (default)
 ?precision=32bit   // Force 32-bit
 ```
-
 
 ## Notes
 

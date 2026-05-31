@@ -25,10 +25,12 @@ export { InputSource };
 export default class DCTLive {
   /**
    * @param {Object} opts
-   * @param {number}  [opts.width=256]  - Canvas / processing width
-   * @param {number}  [opts.height=256] - Canvas / processing height
-   * @param {boolean} [opts.loop=true]  - Continuously re-run the pipeline (default: true)
-   * @param {HTMLCanvasElement} [opts.canvas] - Optional existing canvas
+   * @param {number}  [opts.width=256]     - Canvas / processing width in pixels
+   * @param {number}  [opts.height=256]    - Canvas / processing height in pixels
+   * @param {boolean} [opts.loop=true]     - Continuously re-render on each animation frame
+   * @param {'16bit'|'32bit'|'8bit'} [opts.precision='16bit'] - Float texture precision.
+   *   Falls back along the chain 32→16→8 if the hardware doesn't support the requested mode.
+   * @param {HTMLCanvasElement} [opts.canvas] - Use an existing canvas instead of creating one
    */
   constructor(opts = {}) {
     this.width = opts.width || 256;
@@ -37,17 +39,14 @@ export default class DCTLive {
     this._rafId = null;
     this._lastFrameTime = null;
 
-    // Canvas
     this.canvas = opts.canvas || document.createElement('canvas');
     this.canvas.width = this.width;
     this.canvas.height = this.height;
 
-    // WebGL
     const gl = this.canvas.getContext('webgl');
     if (!gl) throw new Error('WebGL not supported');
     this.gl = gl;
 
-    // GL state
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
 
@@ -55,25 +54,24 @@ export default class DCTLive {
     const { type: texType, actual: precision } = resolveTexType(gl, opts.precision || '16bit');
     this._precision = precision;
 
-    // Modules
     const Pipeline = precision === '8bit' ? RenderPipeline8bit : RenderPipeline;
     this._pipeline = new Pipeline(gl, this.width, this.height, texType);
     this._display = new DisplayController(this.canvas);
     this._config = new ShaderConfig();
 
-    // DCT/RDCT pass control
-    this.dctHorizontal = true;
-    this.dctVertical = true;
-    this.rdctHorizontal = true;
-    this.rdctVertical = true;
+    // DCT/IDCT pass control
+    this.dctHorizontal  = true;
+    this.dctVertical    = true;
+    this.idctHorizontal = true;
+    this.idctVertical   = true;
 
-    // Input source manager
     this.input = new InputSource(gl, this.width, this.height);
 
-    // Define shorthand uniform properties
+    // Shorthand properties (e.g. dct.qY) that proxy to the uniform store.
+    // Note: quantize uniforms (qY, qC, etc.) are squared before reaching the shader —
+    // user input of 0–1 maps to a quadratic curve for perceptual control.
     this._defineShorthandProperties();
 
-    // Auto-start loop when an input source is ready (default: true)
     this._autoLoop = opts.loop !== false;
   }
 
@@ -100,7 +98,7 @@ export default class DCTLive {
       });
     }
 
-    // yOnly has special behavior: swaps programs in the pipeline
+    // yOnly has special behaviour: swaps shader programs in the pipeline
     Object.defineProperty(this, 'yOnly', {
       get: () => this._config.uniforms.yOnly,
       set: (value) => {
@@ -112,39 +110,26 @@ export default class DCTLive {
     });
   }
 
-  // ---- Proxy to modules (backwards compatibility) ----
+  // ---- Public getters — delegate to internal modules ----
 
-  get uniforms() {
-    return this._config.uniforms;
-  }
+  get uniforms()   { return this._config.uniforms; }
+  get precision()  { return this._precision; }
 
-  get precision() {
-    return this._precision;
-  }
-
-  get flipY() {
-    return this._display.flipY;
-  }
-
+  get flipY()      { return this._display.flipY; }
   set flipY(value) {
     this._display.flipY = value;
     this.input.flipY = value;
   }
 
-  get fps() {
-    return this._config.fps;
-  }
-
-  set fps(value) {
-    this._config.fps = value;
-  }
+  get fps()        { return this._config.fps; }
+  set fps(value)   { this._config.fps = value; }
 
   // ---- Image / source loading ----
 
   /**
    * Load an image from a URL or set an HTMLImageElement as input.
    * @param {string|HTMLImageElement} source - URL string or image element
-   * @param {Object} [opts] - { fit, minFilter, magFilter, wrapS, wrapT, wrap }
+   * @param {Object} [opts] - { fit, minFilter, magFilter, wrap }
    * @returns {Promise<void>}
    */
   async initImage(source, opts = {}) {
@@ -166,7 +151,7 @@ export default class DCTLive {
   /**
    * Load a video from a URL or set an HTMLVideoElement as dynamic input.
    * @param {string|HTMLVideoElement} source - URL string or video element
-   * @param {Object} [opts] - { fit, minFilter, magFilter, wrapS, wrapT, wrap }
+   * @param {Object} [opts] - { fit, minFilter, magFilter, wrap }
    * @returns {Promise<void>}
    */
   async initVideo(source, opts = {}) {
@@ -333,30 +318,21 @@ export default class DCTLive {
 
   // ---- Uniform setters ----
 
-  setUniform(name, value) {
-    this._config.setUniform(name, value);
-  }
-
-  setUniforms(obj) {
-    this._config.setUniforms(obj);
-  }
+  setUniform(name, value) { this._config.setUniform(name, value); }
+  setUniforms(obj)        { this._config.setUniforms(obj); }
 
   // ---- Wave function ----
 
   /**
-   * Replace the wave function body in the inverse DCT shader.
+   * Replace the wave function used during inverse DCT reconstruction.
+   * Triggers a recompile of the inverse shader programs.
    * @param {string} glslBody - GLSL function body, e.g. "return cos(angle);"
+   *   Available variables: `angle` (float), `time` (float, ms), `wi` (float, waveInput uniform)
    */
-  setWaveFunction(glslBody) {
-    this._pipeline.setWaveFunction(glslBody);
-  }
+  setWaveFunction(glslBody) { this._pipeline.setWaveFunction(glslBody); }
 
-  /**
-   * Reset the wave function to the default cosine.
-   */
-  resetWaveFunction() {
-    this._pipeline.resetWaveFunction();
-  }
+  /** Reset the wave function to the default cosine. */
+  resetWaveFunction() { this._pipeline.resetWaveFunction(); }
 
   /**
    * Set the WebGL processing resolution.
@@ -381,12 +357,11 @@ export default class DCTLive {
    * @param {number|string} width  - CSS width (number treated as px, or any CSS string)
    * @param {number|string} height - CSS height
    */
-  resizeCanvas(width, height) {
-    this._display.setSize(width, height);
-  }
+  resizeCanvas(width, height) { this._display.setSize(width, height); }
 
   /**
-   * Control which forward DCT passes run (horizontal and/or vertical).
+   * Control which forward DCT passes run (spatial → frequency domain).
+   * Disabling both lets you feed any image into the IDCT as raw coefficient data.
    * Vertical defaults to the same as horizontal if not explicitly set.
    * @param {boolean} [horizontal=true]
    * @param {boolean} [vertical=undefined]
@@ -397,42 +372,41 @@ export default class DCTLive {
   }
 
   /**
-   * Control which inverse DCT passes run (horizontal and/or vertical).
+   * Control which inverse DCT passes run (frequency → spatial domain).
+   * Disabling both lets you visualise raw DCT coefficients directly.
    * Vertical defaults to the same as horizontal if not explicitly set.
    * @param {boolean} [horizontal=true]
    * @param {boolean} [vertical=undefined]
    */
-  setRDCT(horizontal = true, vertical = undefined) {
-    this.rdctHorizontal = !!horizontal;
-    this.rdctVertical = vertical !== undefined ? !!vertical : this.rdctHorizontal;
+  setIDCT(horizontal = true, vertical = undefined) {
+    this.idctHorizontal = !!horizontal;
+    this.idctVertical = vertical !== undefined ? !!vertical : this.idctHorizontal;
   }
 
   // ---- Rendering ----
 
-  /**
-   * Run the DCT/IDCT pipeline once.
-   */
+  /** Run the DCT/IDCT pipeline once. */
   run() {
     if (!this.input.texture) return;
     this.input.update();
     this._pipeline.render({
-      inputTexture: this.input.texture,
-      uvScale:      this.input.uvScale,
-      uvOffset:     this.input.uvOffset,
-      wrap:         this.input.effectiveWrap,
-      dctHorizontal: this.dctHorizontal,
-      dctVertical: this.dctVertical,
-      rdctHorizontal: this.rdctHorizontal,
-      rdctVertical: this.rdctVertical,
+      inputTexture:   this.input.texture,
+      uvScale:        this.input.uvScale,
+      uvOffset:       this.input.uvOffset,
+      wrap:           this.input.effectiveWrap,
+      dctHorizontal:  this.dctHorizontal,
+      dctVertical:    this.dctVertical,
+      idctHorizontal: this.idctHorizontal,
+      idctVertical:   this.idctVertical,
+      quantizeActive: this._config.isQuantizeActive(),
+      flipY:          this.input.flipY,
       resolveUniform: (name) => this._config.resolveUniform(name),
     });
   }
 
   // ---- Loop control ----
 
-  /**
-   * Start the render loop.
-   */
+  /** Start the render loop. */
   start() {
     if (this._looping) return;
     this._looping = true;
@@ -441,7 +415,6 @@ export default class DCTLive {
       if (!this._looping) return;
       const frameInterval = this._config.frameInterval;
       if (this._lastFrameTime === null) {
-        // First tick: always render, anchor the clock cleanly
         this.run();
         this._lastFrameTime = timestamp;
       } else {
@@ -459,9 +432,7 @@ export default class DCTLive {
     this._rafId = requestAnimationFrame(loop);
   }
 
-  /**
-   * Stop the render loop.
-   */
+  /** Stop the render loop. */
   stop() {
     this._looping = false;
     if (this._rafId !== null) {
@@ -472,34 +443,20 @@ export default class DCTLive {
 
   // ---- Display ----
 
-  /**
-   * Show the canvas.
-   */
-  show() {
-    this._display.show();
-  }
+  /** Show the canvas. */
+  show() { this._display.show(); }
 
-  /**
-   * Hide the canvas.
-   */
-  hide() {
-    this._display.hide();
-  }
+  /** Hide the canvas. */
+  hide() { this._display.hide(); }
 
   /**
    * Append the canvas into a DOM parent.
    * @param {HTMLElement} parent
    */
-  mount(parent = document.body) {
-    this._display.mount(parent);
-  }
+  mount(parent = document.body) { this._display.mount(parent); }
 
-  /**
-   * Remove the canvas from the DOM.
-   */
-  unmount() {
-    this._display.unmount();
-  }
+  /** Remove the canvas from the DOM. */
+  unmount() { this._display.unmount(); }
 
   /**
    * Reset to initial configuration: all uniforms to defaults, wave function to cosine, all passes enabled.
@@ -517,15 +474,13 @@ export default class DCTLive {
     this._config.uniforms.waveInput = 0;
     this.yOnly = false;
     this.resetWaveFunction();
-    this.dctHorizontal = true;
-    this.dctVertical = true;
-    this.rdctHorizontal = true;
-    this.rdctVertical = true;
+    this.dctHorizontal  = true;
+    this.dctVertical    = true;
+    this.idctHorizontal = true;
+    this.idctVertical   = true;
   }
 
-  /**
-   * Clean up WebGL resources.
-   */
+  /** Clean up WebGL resources. */
   destroy() {
     this.stop();
     this.hide();
