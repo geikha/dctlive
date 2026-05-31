@@ -1,6 +1,6 @@
 {
   "name": "dctlive",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "WebGL implementation of JPEG-like DCT with real-time controls",
   "author": "geikha",
   "license": "GPL-3.0",
