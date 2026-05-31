@@ -3,21 +3,20 @@ import {
   createFramebuffer,
 } from './gl-utils.js';
 
-import quadVert from './shaders/quad.vert';
-import quadFlipYVert from './shaders/quad-flipy.vert';
-import dctColorInFrag from './shaders/dct-color-in.frag';
-import dctColorOutFrag from './shaders/dct-color-out.frag';
-import dctForwardColorFrag from './shaders/dct-forward-color.frag';
-import dctForwardYFrag from './shaders/dct-forward-y.frag';
-import dctInverseColorFrag from './shaders/dct-inverse-color.frag';
-import dctInverseYFrag from './shaders/dct-inverse-y.frag';
-import dctQuantizeColorFrag from './shaders/dct-quantize-color.frag';
-import dctQuantizeYFrag from './shaders/dct-quantize-y.frag';
-import passthroughFrag from './shaders/passthrough.frag';
-import blitClampFrag from './shaders/blit-clamp.frag';
-import blitRepeatFrag from './shaders/blit-repeat.frag';
-import blitMirrorFrag from './shaders/blit-mirror.frag';
-import blitMaskFrag from './shaders/blit-mask.frag';
+import quadVert from './shaders/vert/quad.vert';
+import colorInFrag from './shaders/pipeline/color-in.frag';
+import colorOutFrag from './shaders/pipeline/color-out.frag';
+import forwardFrag from './shaders/pipeline/forward.frag';
+import forwardYFrag from './shaders/pipeline/forward-y.frag';
+import inverseFrag from './shaders/pipeline/inverse.frag';
+import inverseYFrag from './shaders/pipeline/inverse-y.frag';
+import quantizeFrag from './shaders/pipeline/quantize.frag';
+import quantizeYFrag from './shaders/pipeline/quantize-y.frag';
+import passthroughFrag from './shaders/pipeline/passthrough.frag';
+import blitClampFrag from './shaders/blit/blit-clamp.frag';
+import blitRepeatFrag from './shaders/blit/blit-repeat.frag';
+import blitMirrorFrag from './shaders/blit/blit-mirror.frag';
+import blitMaskFrag from './shaders/blit/blit-mask.frag';
 
 export const DEFAULT_WAVE_BODY = 'return cos(angle);';
 
@@ -47,7 +46,13 @@ export default class RenderPipeline {
     this._attribCache  = new Map();
 
     this._passthroughProgram = buildProgram(gl, quadVert, passthroughFrag);
-    this._passthroughFlipYProgram = buildProgram(gl, quadFlipYVert, passthroughFrag);
+
+    // Flipped version for passthrough: replace #define DCTLIVE_FLIP_UV 0 with 1
+    const passthroughFlipSource = passthroughFrag.replace(
+      '#define DCTLIVE_FLIP_UV 0',
+      '#define DCTLIVE_FLIP_UV 1'
+    );
+    this._passthroughFlipYProgram = buildProgram(gl, quadVert, passthroughFlipSource);
 
     this._blitPrograms = {
       clamp:  buildProgram(gl, quadVert, blitClampFrag),
@@ -67,21 +72,27 @@ export default class RenderPipeline {
   _buildPrograms() {
     const gl = this.gl;
 
-    this._colorInProgram  = buildProgram(gl, quadVert, dctColorInFrag);
-    this._colorOutProgram = buildProgram(gl, quadVert, dctColorOutFrag);
-    this._colorOutFlipYProgram = buildProgram(gl, quadFlipYVert, dctColorOutFrag);
+    this._colorInProgram  = buildProgram(gl, quadVert, colorInFrag);
+    this._colorOutProgram = buildProgram(gl, quadVert, colorOutFrag);
 
-    this._forwardColorProgram = buildProgram(gl, quadVert, dctForwardColorFrag);
-    this._forwardYOnlyProgram = buildProgram(gl, quadVert, dctForwardYFrag);
+    // Flipped version: replace #define DCTLIVE_FLIP_UV 0 with 1
+    const colorOutFlipSource = colorOutFrag.replace(
+      '#define DCTLIVE_FLIP_UV 0',
+      '#define DCTLIVE_FLIP_UV 1'
+    );
+    this._colorOutFlipYProgram = buildProgram(gl, quadVert, colorOutFlipSource);
 
-    this._inverseFragTemplate  = dctInverseColorFrag;
-    this._inverseYFragTemplate = dctInverseYFrag;
+    this._forwardColorProgram = buildProgram(gl, quadVert, forwardFrag);
+    this._forwardYOnlyProgram = buildProgram(gl, quadVert, forwardYFrag);
 
-    this._inverseColorProgram = buildProgram(gl, quadVert, buildInverseSource(dctInverseColorFrag, DEFAULT_WAVE_BODY));
-    this._inverseYOnlyProgram = buildProgram(gl, quadVert, buildInverseSource(dctInverseYFrag, DEFAULT_WAVE_BODY));
+    this._inverseFragTemplate  = inverseFrag;
+    this._inverseYFragTemplate = inverseYFrag;
 
-    this._quantizeColorProgram = buildProgram(gl, quadVert, dctQuantizeColorFrag);
-    this._quantizeYOnlyProgram = buildProgram(gl, quadVert, dctQuantizeYFrag);
+    this._inverseColorProgram = buildProgram(gl, quadVert, buildInverseSource(inverseFrag, DEFAULT_WAVE_BODY));
+    this._inverseYOnlyProgram = buildProgram(gl, quadVert, buildInverseSource(inverseYFrag, DEFAULT_WAVE_BODY));
+
+    this._quantizeColorProgram = buildProgram(gl, quadVert, quantizeFrag);
+    this._quantizeYOnlyProgram = buildProgram(gl, quadVert, quantizeYFrag);
 
     // H and V passes share one program — direction is controlled by the isVert uniform.
     this._activeFwd = this._forwardColorProgram;
@@ -337,7 +348,7 @@ export default class RenderPipeline {
   _renderColorOut(inputTexture, resolveUniform, flipViewport = false) {
     const gl = this.gl;
     const prog = flipViewport ? this._colorOutFlipYProgram : this._colorOutProgram;
-    this._draw(prog, null, () => {  // null = render to canvas
+    this._draw(prog, null, () => {
       gl.uniform2f(this._u(prog, 'resolution'), this.width, this.height);
       gl.uniform1i(this._u(prog, 'yOnlyMode'), this._yOnly ? 1 : 0);
       gl.activeTexture(gl.TEXTURE0);
@@ -348,7 +359,7 @@ export default class RenderPipeline {
 
   _renderPassthrough(inputTexture, target, flipViewport = false) {
     const gl = this.gl;
-    const prog = (target === null && flipViewport) ? this._passthroughFlipYProgram : this._passthroughProgram;
+    const prog = flipViewport ? this._passthroughFlipYProgram : this._passthroughProgram;
     this._draw(prog, target, () => {
       gl.uniform2f(this._u(prog, 'resolution'), this.width, this.height);
       gl.activeTexture(gl.TEXTURE0);

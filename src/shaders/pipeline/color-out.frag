@@ -1,15 +1,18 @@
 precision highp float;
 
-#pragma glslify: ycbcr2rgb = require('./modules/ycbcr2rgb.glsl')
+#pragma glslify: ycbcr2rgb = require('../modules/ycbcr2rgb.glsl')
 
 uniform vec2 resolution;
 uniform sampler2D inputTexture;
 uniform bool yOnlyMode;
-uniform bool flipY;
+
+#define DCTLIVE_FLIP_UV 0
 
 void main() {
   vec2 uv = gl_FragCoord.xy / resolution;
-  if (flipY) uv.y = 1.0 - uv.y;
+  #if DCTLIVE_FLIP_UV == 1
+  uv.y = 1.0 - uv.y;
+  #endif
   vec4 color = texture2D(inputTexture, uv);
 
   if (yOnlyMode) {

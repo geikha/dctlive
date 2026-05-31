@@ -80,6 +80,9 @@ export default class InputSource {
 
   set flipY(val) {
     this._flipY = !!val;
+    if (this._source && this.texture) {
+      this._uploadTexture();
+    }
   }
   get flipY() { return this._flipY; }
 

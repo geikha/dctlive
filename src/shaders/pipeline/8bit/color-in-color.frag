@@ -1,7 +1,7 @@
 precision highp float;
 
-#pragma glslify: rgb2ycbcr = require('../modules/rgb2ycbcr.glsl')
-#pragma glslify: rgbmEncode = require('../modules/rgbm-encode.glsl')
+#pragma glslify: rgb2ycbcr = require('../../modules/rgb2ycbcr.glsl')
+#pragma glslify: rgbmEncode = require('../../modules/rgbm-encode.glsl')
 
 uniform vec2 resolution;
 uniform sampler2D inputTexture;

@@ -1,6 +1,6 @@
 precision highp float;
 
-#pragma glslify: quantizeCoeffY = require('./modules/quantize-coeff-y.glsl')
+#pragma glslify: quantizeCoeffY = require('../modules/quantize-coeff-y.glsl')
 
 uniform vec2 resolution;
 uniform int blockSize;

@@ -14,7 +14,7 @@ float readTexel(vec2 uv) { return texture2D(inputTexture, uv).x; }
 #define DCTLIVE_WAVE_BODY return cos(angle);
 float wave(float angle) { DCTLIVE_WAVE_BODY }
 
-#pragma glslify: dctInverseY = require('./modules/dct-inverse-y.glsl', readTexel=readTexel, wave=wave)
+#pragma glslify: dctInverseY = require('../modules/dct-inverse-y.glsl', readTexel=readTexel, wave=wave)
 
 void main() {
   gl_FragColor = vec4(dctInverseY(gl_FragCoord.xy, resolution, isVert, blockSize, lpf), 0.0, 0.0, 1.0);

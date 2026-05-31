@@ -1,7 +1,7 @@
 import { buildProgram } from './gl-utils.js';
 import RenderPipeline, { DEFAULT_WAVE_BODY, buildInverseSource } from './render-pipeline.js';
 
-import quadVert from './shaders/quad.vert';
+import quadVert from './shaders/vert/quad.vert';
 
 // 8-bit precision pipeline using RGBM (color) and YM (Y-only) encoding.
 //
@@ -23,16 +23,16 @@ import quadVert from './shaders/quad.vert';
 // Unlike the float pipeline, color-in and color-out differ between color/Y-only
 // modes (different codec), so setYOnly() swaps all four active programs.
 
-import fwdColor      from './shaders/8bit/forward-color.frag';
-import fwdY          from './shaders/8bit/forward-y.frag';
-import invColor      from './shaders/8bit/inverse-color.frag';
-import invY          from './shaders/8bit/inverse-y.frag';
-import quantColor    from './shaders/8bit/quantize-color.frag';
-import quantY        from './shaders/8bit/quantize-y.frag';
-import colorInColor  from './shaders/8bit/color-in-color.frag';
-import colorInY      from './shaders/8bit/color-in-y.frag';
-import colorOutColor from './shaders/8bit/color-out-color.frag';
-import colorOutY     from './shaders/8bit/color-out-y.frag';
+import fwdColor      from './shaders/pipeline/8bit/forward-color.frag';
+import fwdY          from './shaders/pipeline/8bit/forward-y.frag';
+import invColor      from './shaders/pipeline/8bit/inverse-color.frag';
+import invY          from './shaders/pipeline/8bit/inverse-y.frag';
+import quantColor    from './shaders/pipeline/8bit/quantize-color.frag';
+import quantY        from './shaders/pipeline/8bit/quantize-y.frag';
+import colorInColor  from './shaders/pipeline/8bit/color-in-color.frag';
+import colorInY      from './shaders/pipeline/8bit/color-in-y.frag';
+import colorOutColor from './shaders/pipeline/8bit/color-out-color.frag';
+import colorOutY     from './shaders/pipeline/8bit/color-out-y.frag';
 
 export default class RenderPipeline8bit extends RenderPipeline {
   _buildPrograms() {
@@ -43,6 +43,18 @@ export default class RenderPipeline8bit extends RenderPipeline {
     this._colorInYProgram      = buildProgram(gl, quadVert, colorInY);
     this._colorOutColorProgram = buildProgram(gl, quadVert, colorOutColor);
     this._colorOutYProgram     = buildProgram(gl, quadVert, colorOutY);
+
+    // Flipped versions: replace #define DCTLIVE_FLIP_UV 0 with 1
+    const colorOutColorFlipSource = colorOutColor.replace(
+      '#define DCTLIVE_FLIP_UV 0',
+      '#define DCTLIVE_FLIP_UV 1'
+    );
+    const colorOutYFlipSource = colorOutY.replace(
+      '#define DCTLIVE_FLIP_UV 0',
+      '#define DCTLIVE_FLIP_UV 1'
+    );
+    this._colorOutColorFlipYProgram = buildProgram(gl, quadVert, colorOutColorFlipSource);
+    this._colorOutYFlipYProgram     = buildProgram(gl, quadVert, colorOutYFlipSource);
 
     // Active color-in/out start in color mode (matches base class default)
     this._colorInProgram  = this._colorInColorProgram;
@@ -81,9 +93,10 @@ export default class RenderPipeline8bit extends RenderPipeline {
   setYOnly(enabled) {
     this._yOnly = enabled;
 
-    // Swap color-in/out to match codec (RGBM ↔ YM)
+    // Swap color-in/out to match codec (RGBM ↔ YM), both normal and flipY variants
     this._colorInProgram  = enabled ? this._colorInYProgram      : this._colorInColorProgram;
     this._colorOutProgram = enabled ? this._colorOutYProgram     : this._colorOutColorProgram;
+    this._colorOutFlipYProgram = enabled ? this._colorOutYFlipYProgram : this._colorOutColorFlipYProgram;
 
     this._activeFwd = enabled ? this._forwardYOnlyProgram : this._forwardColorProgram;
     this._activeInv = enabled ? this._inverseYOnlyProgram : this._inverseColorProgram;
@@ -93,6 +106,7 @@ export default class RenderPipeline8bit extends RenderPipeline {
     this._deletePrograms(
       this._colorInColorProgram, this._colorInYProgram,
       this._colorOutColorProgram, this._colorOutYProgram,
+      this._colorOutColorFlipYProgram, this._colorOutYFlipYProgram,
       this._forwardColorProgram, this._forwardYOnlyProgram,
       this._inverseColorProgram, this._inverseYOnlyProgram,
       this._quantizeColorProgram, this._quantizeYOnlyProgram,
