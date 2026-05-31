@@ -70,6 +70,25 @@ export default class ShaderConfig {
   }
 
   /**
+   * Resolve all uniforms at once. Returns an object with all shader parameters resolved.
+   * @returns {Object} { blockSize, lpf, highFreqMultiplier, quantizeY, ... }
+   */
+  resolveAllUniforms() {
+    return {
+      blockSize: this.resolveUniform('blockSize'),
+      lpf: this.resolveUniform('lpf'),
+      highFreqMultiplier: this.resolveUniform('highFreqMultiplier'),
+      quantizeY: this.resolveUniform('quantizeY'),
+      quantizeYf: this.resolveUniform('quantizeYf'),
+      quantizeC: this.resolveUniform('quantizeC'),
+      quantizeCf: this.resolveUniform('quantizeCf'),
+      quantizeA: this.resolveUniform('quantizeA'),
+      quantizeAf: this.resolveUniform('quantizeAf'),
+      waveInput: this.resolveUniform('waveInput'),
+    };
+  }
+
+  /**
    * Returns true if any quantization or high-frequency parameter is non-zero.
    * Used to skip the quantize render pass entirely when it would be a no-op.
    */

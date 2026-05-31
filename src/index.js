@@ -15,10 +15,10 @@
 
 import InputSource from './input-source.js';
 import RenderPipeline from './render-pipeline.js';
-import RenderPipeline8bit from './render-pipeline-8bit.js';
 import DisplayController from './display-controller.js';
 import ShaderConfig from './shader-config.js';
 import { resolveTexType } from './gl-utils.js';
+import { FloatShaderProvider, Bit8ShaderProvider } from './shader-providers.js';
 
 export { InputSource };
 
@@ -54,8 +54,8 @@ export default class DCTLive {
     const { type: texType, actual: precision } = resolveTexType(gl, opts.precision || '16bit');
     this._precision = precision;
 
-    const Pipeline = precision === '8bit' ? RenderPipeline8bit : RenderPipeline;
-    this._pipeline = new Pipeline(gl, this.width, this.height, texType);
+    const shaderProvider = precision === '8bit' ? new Bit8ShaderProvider() : new FloatShaderProvider();
+    this._pipeline = new RenderPipeline(gl, this.width, this.height, texType, shaderProvider);
     this._display = new DisplayController(this.canvas);
     this._config = new ShaderConfig();
 
@@ -400,7 +400,7 @@ export default class DCTLive {
       idctVertical:   this.idctVertical,
       quantizeActive: this._config.isQuantizeActive(),
       flipY:          this.input.flipY,
-      resolveUniform: (name) => this._config.resolveUniform(name),
+      uniforms:       this._config.resolveAllUniforms(),
     });
   }
 
