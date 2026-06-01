@@ -1,23 +1,28 @@
 #define PI 3.14159265
+#define DCTLIVE_IS_VERT 0
 
-// 1D forward DCT, scalar (Y-only) variant. Same math as dct-forward.glsl but
-// operates on a single float channel — cheaper inner loop for luminance-only processing.
-// The caller injects readTexel(vec2 uv) → float.
-float dctForwardY(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize) {
-  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
-  vec2 block = bv * float(blockSize - 1) + vec2(1.0);
-  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;
-  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));
+// Scalar variant of dctForward (see dct-forward.glsl for full documentation).
+// Same math, outputs float instead of vec4. Cheaper for luminance-only processing.
+float dctForwardY(vec2 fragCoord, vec2 resolution, int blockSize) {
+  #if DCTLIVE_IS_VERT == 1
+  vec2 direction = vec2(0.0, 1.0);
+  #else
+  vec2 direction = vec2(1.0, 0.0);
+  #endif
 
-  float freq = floor(mod(dot(bv, fragCoord), float(blockSize))) / float(bs) * PI;
-  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);
+  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);
+  vec2 blockCorner = 0.5 + floor(fragCoord / blockStride) * blockStride;
+  int N = int(min(float(blockSize), dot(direction, resolution - blockCorner + 0.5)));
+
+  float k = floor(mod(dot(direction, fragCoord), float(blockSize))) / float(N) * PI;
+  float scale = (1.0 + step(0.001, abs(k))) / float(N);
 
   float sum = 0.0;
-  for (int i = 0; i < 1024; i++) {
-    if (bs <= i) break;
-    vec2 uv = (blockOrigin + float(i) * bv) / resolution;
-    float w = cos((float(i) + 0.5) * freq);
-    sum += w * factor * readTexel(uv);
+  for (int n = 0; n < 1024; n++) {
+    if (N <= n) break;
+    vec2 sampleUv = (blockCorner + float(n) * direction) / resolution;
+    float basis = cos((float(n) + 0.5) * k);
+    sum += basis * scale * readTexel(sampleUv);
   }
   return sum;
 }

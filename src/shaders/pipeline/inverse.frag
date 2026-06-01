@@ -1,7 +1,6 @@
 precision highp float;
 
 uniform vec2 resolution;
-uniform bool isVert;
 uniform int blockSize;
 uniform sampler2D inputTexture;
 uniform float lpf;
@@ -17,5 +16,5 @@ float wave(float angle) { DCTLIVE_WAVE_BODY }
 #pragma glslify: dctInverse = require('../modules/dct-inverse.glsl', readTexel=readTexel, wave=wave)
 
 void main() {
-  gl_FragColor = dctInverse(gl_FragCoord.xy, resolution, isVert, blockSize, lpf);
+  gl_FragColor = dctInverse(gl_FragCoord.xy, resolution, blockSize, lpf);
 }

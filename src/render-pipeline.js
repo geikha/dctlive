@@ -3,29 +3,12 @@ import {
   createFramebuffer,
 } from './gl-utils.js';
 
-import quadVert from './shaders/vert/quad.vert';
-import passthroughFrag from './shaders/pipeline/passthrough.frag';
-import blitClampFrag from './shaders/blit/blit-clamp.frag';
-import blitRepeatFrag from './shaders/blit/blit-repeat.frag';
-import blitMirrorFrag from './shaders/blit/blit-mirror.frag';
-import blitMaskFrag from './shaders/blit/blit-mask.frag';
+import { DEFAULT_WAVE_BODY } from './shader-providers.js';
 
-export const DEFAULT_WAVE_BODY = 'return cos(angle);';
-
-function flipDefine(fragSrc) {
-  return fragSrc.replace('#define DCTLIVE_FLIP_UV 0', '#define DCTLIVE_FLIP_UV 1');
-}
-
-// Patch the DCTLIVE_WAVE_BODY define in a glslified inverse shader source.
-// Using a #define (rather than replacing the function body directly) means the
-// target is a preprocessor directive — glslify never renames these, so the
-// pattern is stable across shader refactors.
-export function buildInverseSource(templateSrc, waveBody) {
-  const pattern = /#define DCTLIVE_WAVE_BODY [^\n]*/;
-  if (!pattern.test(templateSrc)) {
-    throw new Error('DCTLive: could not locate DCTLIVE_WAVE_BODY define in inverse shader');
-  }
-  return templateSrc.replace(pattern, `#define DCTLIVE_WAVE_BODY ${waveBody}`);
+// Keep as exported alias for any external callers.
+export { DEFAULT_WAVE_BODY };
+export function buildInverseSource(src, body) {
+  return src.replace(/#define DCTLIVE_WAVE_BODY [^\n]*/, `#define DCTLIVE_WAVE_BODY ${body}`);
 }
 
 export default class RenderPipeline {
@@ -44,37 +27,22 @@ export default class RenderPipeline {
     this._uniformCache = new Map();
     this._attribCache  = new Map();
 
-    this._passthroughProgram      = buildProgram(gl, quadVert, passthroughFrag);
-    this._passthroughFlipYProgram = buildProgram(gl, quadVert, flipDefine(passthroughFrag));
-
-    this._blitPrograms = {
-      clamp:  buildProgram(gl, quadVert, blitClampFrag),
-      repeat: buildProgram(gl, quadVert, blitRepeatFrag),
-      mirror: buildProgram(gl, quadVert, blitMirrorFrag),
-      mask:   buildProgram(gl, quadVert, blitMaskFrag),
-    };
-
     this._quadBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
-    this._buildPrograms();
+    this._buildStaticPrograms();
+    this._buildPipelinePrograms();
+    this._buildInversePrograms();
     this._createFramebuffers();
   }
 
   destroy() {
     const gl = this.gl;
-
-    this._deletePrograms(
-      this._colorInProgram, this._colorOutProgram, this._colorOutFlipYProgram,
-      this._forwardColorProgram, this._forwardYOnlyProgram,
-      this._inverseColorProgram, this._inverseYOnlyProgram,
-      this._quantizeColorProgram, this._quantizeYOnlyProgram,
-      this._passthroughProgram, this._passthroughFlipYProgram,
-    );
-    for (const prog of Object.values(this._blitPrograms)) this._deletePrograms(prog);
+    this._deleteStaticPrograms();
+    this._deletePipelinePrograms();
+    this._deleteInversePrograms();
     gl.deleteBuffer(this._quadBuffer);
-
     for (const fb of [this._fbBlit, this._fbColor, this._fbTemp, this._fbDCT, this._fbQuantized, this._fbFinal]) {
       gl.deleteFramebuffer(fb.framebuffer);
       gl.deleteTexture(fb.texture);
@@ -92,39 +60,18 @@ export default class RenderPipeline {
   setYOnly(enabled) {
     this._yOnly = enabled;
     this.shaderProvider.yOnly = enabled;
-
-    // Rebuild programs that may have changed based on yOnly state
-    this._deletePrograms(
-      this._colorInProgram, this._colorOutProgram, this._colorOutFlipYProgram,
-      this._forwardColorProgram, this._forwardYOnlyProgram,
-      this._inverseColorProgram, this._inverseYOnlyProgram,
-    );
-    this._buildPrograms();
-
-    // Restore wave function if non-default
-    if (this._waveBody !== DEFAULT_WAVE_BODY) {
-      this._deletePrograms(this._inverseColorProgram, this._inverseYOnlyProgram);
-      this._inverseColorProgram = buildProgram(this.gl, quadVert, buildInverseSource(this._inverseFragTemplate, this._waveBody));
-      this._inverseYOnlyProgram = buildProgram(this.gl, quadVert, buildInverseSource(this._inverseYFragTemplate, this._waveBody));
-    }
-
-    this._activeFwd = enabled ? this._forwardYOnlyProgram : this._forwardColorProgram;
-    this._activeInv = enabled ? this._inverseYOnlyProgram : this._inverseColorProgram;
+    this._deletePipelinePrograms();
+    this._deleteInversePrograms();
+    this._buildPipelinePrograms();
+    this._buildInversePrograms();
   }
 
   setWaveFunction(glslBody) {
-    // Normalize to single line: collapse whitespace and newlines to prevent multiline define syntax.
     const normalized = glslBody.trim().replace(/\s+/g, ' ');
-    const colorSource = buildInverseSource(this._inverseFragTemplate, normalized);
-    const yOnlySource = buildInverseSource(this._inverseYFragTemplate, normalized);
-
-    this._deletePrograms(this._inverseColorProgram, this._inverseYOnlyProgram);
-
-    this._inverseColorProgram = buildProgram(this.gl, quadVert, colorSource);
-    this._inverseYOnlyProgram = buildProgram(this.gl, quadVert, yOnlySource);
-
-    this._activeInv = this._yOnly ? this._inverseYOnlyProgram : this._inverseColorProgram;
     this._waveBody = normalized;
+    this.shaderProvider.waveBody = normalized;
+    this._deleteInversePrograms();
+    this._buildInversePrograms();
   }
 
   resetWaveFunction() {
@@ -170,8 +117,7 @@ export default class RenderPipeline {
 
     // Stage 4: Quantization (if active, writes to _fbQuantized)
     if (anyDCT && quantizeActive) {
-      const prog = this._yOnly ? this._quantizeYOnlyProgram : this._quantizeColorProgram;
-      this._renderQuantize(prog, inputTex, uniforms);
+      this._renderQuantize(inputTex, uniforms);
       inputTex = this._fbQuantized.texture;
     }
 
@@ -198,7 +144,7 @@ export default class RenderPipeline {
   // ===== 4. PIPELINE STAGE METHODS =====
 
   _runBlit(rawTex, uvScale, uvOffset, wrap) {
-    const prog = this._blitPrograms[wrap] || this._blitPrograms.mask;
+    const prog = this._staticPrograms.blit[wrap] || this._staticPrograms.blit.mask;
     this._executePass({
       program:  prog,
       target:   this._fbBlit.framebuffer,
@@ -214,7 +160,7 @@ export default class RenderPipeline {
 
   _renderColorIn(inputTexture) {
     this._executePass({
-      program:  this._colorInProgram,
+      program:  this._pipelinePrograms.colorIn,
       target:   this._fbColor.framebuffer,
       uniforms: { resolution: this._res },
       textures: { inputTexture },
@@ -223,13 +169,12 @@ export default class RenderPipeline {
 
   _renderForwardDCTHorizontal(inputTex, uniforms) {
     this._executePass({
-      program: this._activeFwd,
-      target: this._fbTemp.framebuffer,
+      program:  this._pipelinePrograms.fwdH,
+      target:   this._fbTemp.framebuffer,
       uniforms: {
         resolution: this._res,
         lpf:       { type: 'float', value: uniforms.lpf },
         blockSize: { type: 'int',   value: uniforms.blockSize },
-        isVert:    { type: 'int',   value: 0 },
       },
       textures: { inputTexture: inputTex },
     });
@@ -237,19 +182,18 @@ export default class RenderPipeline {
 
   _renderForwardDCTVertical(inputTex, uniforms) {
     this._executePass({
-      program: this._activeFwd,
-      target: this._fbDCT.framebuffer,
+      program:  this._pipelinePrograms.fwdV,
+      target:   this._fbDCT.framebuffer,
       uniforms: {
         resolution: this._res,
         lpf:       { type: 'float', value: uniforms.lpf },
         blockSize: { type: 'int',   value: uniforms.blockSize },
-        isVert:    { type: 'int',   value: 1 },
       },
       textures: { inputTexture: inputTex },
     });
   }
 
-  _renderQuantize(program, inputTexture, uniforms) {
+  _renderQuantize(inputTexture, uniforms) {
     const passUniforms = {
       resolution:         this._res,
       blockSize:          { type: 'int',   value: uniforms.blockSize },
@@ -263,20 +207,19 @@ export default class RenderPipeline {
       passUniforms.quantizeA  = { type: 'float', value: uniforms.quantizeA };
       passUniforms.quantizeAf = { type: 'float', value: uniforms.quantizeAf };
     }
-    this._executePass({ program, target: this._fbQuantized.framebuffer, uniforms: passUniforms, textures: { inputTexture } });
+    this._executePass({ program: this._pipelinePrograms.quantize, target: this._fbQuantized.framebuffer, uniforms: passUniforms, textures: { inputTexture } });
   }
 
   _renderInverseDCTHorizontal(inputTex, uniforms) {
     this._executePass({
-      program: this._activeInv,
-      target: this._fbTemp.framebuffer,
+      program:  this._inversePrograms.invH,
+      target:   this._fbTemp.framebuffer,
       uniforms: {
         resolution: this._res,
         lpf:       { type: 'float', value: uniforms.lpf },
         blockSize: { type: 'int',   value: uniforms.blockSize },
         time:      { type: 'float', value: performance.now() / 1000.0 },
         wi:        { type: 'float', value: uniforms.waveInput },
-        isVert:    { type: 'int',   value: 0 },
       },
       textures: { inputTexture: inputTex },
     });
@@ -284,35 +227,33 @@ export default class RenderPipeline {
 
   _renderInverseDCTVertical(inputTex, uniforms) {
     this._executePass({
-      program: this._activeInv,
-      target: this._fbFinal.framebuffer,
+      program:  this._inversePrograms.invV,
+      target:   this._fbFinal.framebuffer,
       uniforms: {
         resolution: this._res,
         lpf:       { type: 'float', value: uniforms.lpf },
         blockSize: { type: 'int',   value: uniforms.blockSize },
         time:      { type: 'float', value: performance.now() / 1000.0 },
         wi:        { type: 'float', value: uniforms.waveInput },
-        isVert:    { type: 'int',   value: 1 },
       },
       textures: { inputTexture: inputTex },
     });
   }
 
   _renderColorOut(inputTexture, flipViewport = false) {
+    const prog = flipViewport ? this._pipelinePrograms.colorOutFlipY : this._pipelinePrograms.colorOut;
     this._executePass({
-      program:  flipViewport ? this._colorOutFlipYProgram : this._colorOutProgram,
+      program:  prog,
       target:   null,
-      uniforms: {
-        resolution: this._res,
-        yOnlyMode:  { type: 'int', value: this._yOnly ? 1 : 0 },
-      },
+      uniforms: { resolution: this._res },
       textures: { inputTexture },
     });
   }
 
   _renderPassthrough(inputTexture, target, flipViewport = false) {
+    const prog = flipViewport ? this._staticPrograms.passthroughFlipY : this._staticPrograms.passthrough;
     this._executePass({
-      program:  flipViewport ? this._passthroughFlipYProgram : this._passthroughProgram,
+      program:  prog,
       target,
       uniforms: { resolution: this._res },
       textures: { inputTexture },
@@ -370,42 +311,69 @@ export default class RenderPipeline {
 
   _deletePrograms(...progs) {
     for (const prog of progs) {
+      if (!prog) continue;
       this.gl.deleteProgram(prog);
       this._uniformCache.delete(prog);
       this._attribCache.delete(prog);
     }
   }
 
-  _buildPrograms() {
-    const gl = this.gl;
+  _buildStaticPrograms() {
     const sh = this.shaderProvider;
+    this._staticPrograms = {
+      blit: Object.fromEntries(
+        Object.entries(sh.blit).map(([k, v]) => [k, buildProgram(this.gl, sh.vert, v)])
+      ),
+      passthrough:      buildProgram(this.gl, sh.vert, sh.passthrough),
+      passthroughFlipY: buildProgram(this.gl, sh.vert, sh.passthroughFlipY),
+    };
+  }
 
-    this._colorInProgram       = buildProgram(gl, quadVert, sh.colorIn);
-    this._colorOutProgram      = buildProgram(gl, quadVert, sh.colorOut);
-    this._colorOutFlipYProgram = buildProgram(gl, quadVert, flipDefine(sh.colorOut));
+  _buildPipelinePrograms() {
+    const sh = this.shaderProvider;
+    this._pipelinePrograms = {
+      colorIn:       buildProgram(this.gl, sh.vert, sh.colorIn),
+      colorOut:      buildProgram(this.gl, sh.vert, sh.colorOut),
+      colorOutFlipY: buildProgram(this.gl, sh.vert, sh.colorOutFlipY),
+      fwdH:          buildProgram(this.gl, sh.vert, sh.forwardH),
+      fwdV:          buildProgram(this.gl, sh.vert, sh.forwardV),
+      quantize:      buildProgram(this.gl, sh.vert, sh.quantize),
+    };
+  }
 
-    this._forwardColorProgram  = buildProgram(gl, quadVert, sh.forward);
-    this._forwardYOnlyProgram  = buildProgram(gl, quadVert, sh.forwardY);
+  _buildInversePrograms() {
+    const sh = this.shaderProvider;
+    this._inversePrograms = {
+      invH: buildProgram(this.gl, sh.vert, sh.inverseH),
+      invV: buildProgram(this.gl, sh.vert, sh.inverseV),
+    };
+  }
 
-    this._inverseFragTemplate  = sh.inverse;
-    this._inverseYFragTemplate = sh.inverseY;
+  _deleteStaticPrograms() {
+    if (!this._staticPrograms) return;
+    for (const prog of Object.values(this._staticPrograms.blit)) this._deletePrograms(prog);
+    this._deletePrograms(this._staticPrograms.passthrough, this._staticPrograms.passthroughFlipY);
+    this._staticPrograms = null;
+  }
 
-    this._inverseColorProgram  = buildProgram(gl, quadVert, buildInverseSource(sh.inverse, DEFAULT_WAVE_BODY));
-    this._inverseYOnlyProgram  = buildProgram(gl, quadVert, buildInverseSource(sh.inverseY, DEFAULT_WAVE_BODY));
+  _deletePipelinePrograms() {
+    if (!this._pipelinePrograms) return;
+    this._deletePrograms(...Object.values(this._pipelinePrograms));
+    this._pipelinePrograms = null;
+  }
 
-    this._quantizeColorProgram = buildProgram(gl, quadVert, sh.quantize);
-    this._quantizeYOnlyProgram = buildProgram(gl, quadVert, sh.quantizeY);
-
-    this._activeFwd = this._forwardColorProgram;
-    this._activeInv = this._inverseColorProgram;
+  _deleteInversePrograms() {
+    if (!this._inversePrograms) return;
+    this._deletePrograms(this._inversePrograms.invH, this._inversePrograms.invV);
+    this._inversePrograms = null;
   }
 
   _createFramebuffers() {
     const gl = this.gl;
     const t = this._texType;
-    this._fbBlit     = createFramebuffer(gl, this.width, this.height, t);
-    this._fbColor   = createFramebuffer(gl, this.width, this.height, t);
-    this._fbTemp     = createFramebuffer(gl, this.width, this.height, t);
+    this._fbBlit      = createFramebuffer(gl, this.width, this.height, t);
+    this._fbColor     = createFramebuffer(gl, this.width, this.height, t);
+    this._fbTemp      = createFramebuffer(gl, this.width, this.height, t);
     this._fbDCT       = createFramebuffer(gl, this.width, this.height, t);
     this._fbQuantized = createFramebuffer(gl, this.width, this.height, t);
     this._fbFinal     = createFramebuffer(gl, this.width, this.height, t);

@@ -1,23 +1,28 @@
 #define PI 3.14159265
+// 0 = horizontal pass, 1 = vertical pass. Injected by shader provider via patchDefines.
+#define DCTLIVE_IS_VERT 0
 
-// 1D inverse DCT, scalar (Y-only) variant. Same math as dct-inverse.glsl but
-// accumulates a single float -- cheaper inner loop for luminance-only reconstruction.
-// The caller injects readTexel(vec2 uv) -> float and wave(float) -> float.
-float dctInverseY(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize, float lpf) {
-  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
-  vec2 block = bv * float(blockSize - 1) + vec2(1.0);
-  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;
-  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));
-  int loopLimit = int(min(float(bs), lpf));
+// Scalar variant of dctInverse (see dct-inverse.glsl for full documentation).
+// Same math, outputs float instead of vec4. Cheaper for luminance-only reconstruction.
+float dctInverseY(vec2 fragCoord, vec2 resolution, int blockSize, float lpf) {
+  #if DCTLIVE_IS_VERT == 1
+  vec2 direction = vec2(0.0, 1.0);
+  #else
+  vec2 direction = vec2(1.0, 0.0);
+  #endif
 
-  float delta = mod(dot(bv, fragCoord), float(blockSize));
+  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);
+  vec2 blockOrigin = 0.5 + floor(fragCoord / blockStride) * blockStride;
+  int N = int(min(float(blockSize), dot(direction, resolution - blockOrigin + 0.5)));
+  int loopLimit = int(min(float(N), lpf));
+
+  float delta = mod(dot(direction, fragCoord), float(blockSize)) / float(N) * PI;
 
   float sum = 0.0;
-  for (int i = 0; i < 1024; i++) {
-    if (loopLimit <= i) break;
-    float fdelta = float(i);
-    float lum = readTexel((blockOrigin + bv * fdelta) / resolution);
-    sum += wave(delta * fdelta / float(bs) * PI) * lum;
+  for (int k = 0; k < 1024; k++) {
+    if (loopLimit <= k) break;
+    float coeff = readTexel((blockOrigin + direction * float(k)) / resolution);
+    sum += wave(delta * float(k)) * coeff;
   }
   return sum;
 }

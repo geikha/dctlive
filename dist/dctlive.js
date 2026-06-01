@@ -387,22 +387,118 @@ var DCTLiveModule = (function (exports) {
 
   var blitMaskFrag = "precision highp float;\n#define GLSLIFY 1\nuniform sampler2D inputTexture;\nuniform vec2 resolution;\nuniform vec2 uvScale;\nuniform vec2 uvOffset;\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  uv = uv * uvScale + uvOffset;\n  vec2 inBounds = step(vec2(0.0), uv) * step(uv, vec2(1.0));\n  float mask = inBounds.x * inBounds.y;\n  gl_FragColor = texture2D(inputTexture, uv) * mask;\n}\n";
 
+  var colorInFrag = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601: convert linear RGB (0–1) to YCbCr.\n// Y  = luminance.  Cb = blue-difference chroma.  Cr = red-difference chroma.\n// The chroma channels are centred on zero (neutral grey = 0, not 0.5).\nvec3 rgb2ycbcr(vec3 rgb) {\n  return vec3(\n     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,\n    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,\n     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b\n  );\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec4 color = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  color.rgb = rgb2ycbcr(color.rgb);\n  gl_FragColor = color;\n}\n";
+
+  var colorOutFrag = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601 inverse: YCbCr → linear RGB.\n// Exact inverse of rgb2ycbcr — chroma channels are zero-centred.\nvec3 ycbcr2rgb(vec3 yuv) {\n  return vec3(\n    yuv.x + 1.402    * yuv.z,\n    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,\n    yuv.x + 1.772    * yuv.y\n  );\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\n#define DCTLIVE_FLIP_UV 0\n#define DCTLIVE_Y_ONLY 0\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  #if DCTLIVE_FLIP_UV == 1\n  uv.y = 1.0 - uv.y;\n  #endif\n  vec4 color = texture2D(inputTexture, uv);\n\n  #if DCTLIVE_Y_ONLY == 1\n  color.rgb = vec3(color.x);\n  color.a = 1.0;\n  #else\n  color.rgb = ycbcr2rgb(color.rgb);\n  #endif\n\n  gl_FragColor = color;\n}\n";
+
+  var forwardFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nvec4 readTexel(vec2 uv) { return texture2D(inputTexture, uv); }\n\n#define PI 3.14159265\n#define DCTLIVE_IS_VERT 0\n\n// 1D forward DCT: compute one frequency coefficient F[k] for a spatial block.\n//\n// This fragment's output position determines which frequency bin it represents.\n// Formula: F[k] = scale * Σ(n=0..N-1) x[n] * cos((n+0.5)*k*π/N)\n//   k: frequency index (0=DC, 1..N-1=harmonics) within the block\n//   x[n]: input sample at spatial position n in the block\n//   N: effective block size (clamped to image boundary)\n//   scale: DCT-II orthonormal factor (1/N for DC, 2/N for harmonics)\n//\n// Injected by caller:\n//   readTexel(vec2 uv) -> vec4  -- read input sample; handles any codec wrapping (see 8 bit versions)\nvec4 dctForward(vec2 fragCoord, vec2 resolution, int blockSize) {\n  // Scan direction: horizontal (freq along x) or vertical (freq along y)\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  // Locate the block containing this fragment.\n  // blockStride: distance (in texels) between consecutive block starts in this direction\n  // blockCorner: position of the top-left corner of this fragment's block\n  // N: effective block size, clamped to image boundary (may be < blockSize at edges)\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockCorner = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockCorner + 0.5)));\n\n  // Compute this fragment's frequency index (0 to N-1), then scale to [0, π]\n  float freq = floor(mod(dot(direction, fragCoord), float(blockSize))) / float(N) * PI;\n\n  // DCT-II orthonormal scaling: 1/N for DC (freq≈0), 2/N for harmonics.\n  // Using branchless step() to avoid GPU branch prediction penalty.\n  float scale = (1.0 + step(0.001, abs(freq))) / float(N);\n\n  vec4 sum = vec4(0.0);\n  for (int n = 0; n < 1024; n++) {\n    if (N <= n) break;\n    vec2 sampleUv = (blockCorner + float(n) * direction) / resolution;\n    float basis = cos((float(n) + 0.5) * freq);\n    sum += basis * scale * readTexel(sampleUv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = dctForward(gl_FragCoord.xy, resolution, blockSize);\n}\n";
+
+  var forwardYFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nfloat readTexel(vec2 uv) { return texture2D(inputTexture, uv).x; }\n\n#define PI 3.14159265\n#define DCTLIVE_IS_VERT 0\n\n// Scalar variant of dctForward (see dct-forward.glsl for full documentation).\n// Same math, outputs float instead of vec4. Cheaper for luminance-only processing.\nfloat dctForwardY(vec2 fragCoord, vec2 resolution, int blockSize) {\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockCorner = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockCorner + 0.5)));\n\n  float k = floor(mod(dot(direction, fragCoord), float(blockSize))) / float(N) * PI;\n  float scale = (1.0 + step(0.001, abs(k))) / float(N);\n\n  float sum = 0.0;\n  for (int n = 0; n < 1024; n++) {\n    if (N <= n) break;\n    vec2 sampleUv = (blockCorner + float(n) * direction) / resolution;\n    float basis = cos((float(n) + 0.5) * k);\n    sum += basis * scale * readTexel(sampleUv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = vec4(dctForwardY(gl_FragCoord.xy, resolution, blockSize), 0.0, 0.0, 1.0);\n}\n";
+
+  var inverseFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nvec4 readTexel(vec2 uv) { return texture2D(inputTexture, uv); }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n// 0 = horizontal pass, 1 = vertical pass. Injected by shader provider via patchDefines.\n#define DCTLIVE_IS_VERT 0\n\n// 1D inverse DCT: reconstruct one spatial output pixel from frequency coefficients.\n//\n// This fragment's output position determines which spatial position it reconstructs.\n// Formula: x[delta] = Σ(k=0..N-1) F[k] * wave(delta*k*π/N)\n//   delta: spatial position within block (0 to N-1), read from fragment position\n//   F[k]: frequency coefficient at index k (read from input texture)\n//   N: effective block size (clamped to image boundary)\n//   wave(angle): reconstruction basis function (normally cos for DCT-II)\n//   lpf: low-pass filter limit (only sum k from 0 to min(lpf, N-1))\n//\n// Injected by caller:\n//   readTexel(vec2 uv) -> vec4  -- read coefficient; handles any codec wrapping (see 8 bit versions)\n//   wave(float angle) -> float  -- the reconstruction basis function, cos() by default\nvec4 dctInverse(vec2 fragCoord, vec2 resolution, int blockSize, float lpf) {\n  // Scan direction: horizontal (reconstruct spatial X) or vertical (reconstruct spatial Y)\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  // Locate the block containing this fragment.\n  // blockStride: distance (in texels) between consecutive block starts in this direction\n  // blockOrigin: position of the top-left corner of this fragment's block\n  // N: effective block size, clamped to image boundary (may be < blockSize at edges)\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockOrigin + 0.5)));\n\n  // Limit reconstruction to the first `loopLimit` frequency bins (low-pass filter).\n  // loopLimit = 1: DC only. loopLimit = N: full reconstruction.\n  int loopLimit = int(min(float(N), lpf));\n\n  // This fragment's spatial position within its block (0 to N-1), scaled to [0, π]\n  float delta = mod(dot(direction, fragCoord), float(blockSize)) / float(N) * PI;\n\n  vec4 sum = vec4(0.0);\n  for (int k = 0; k < 1024; k++) {\n    if (loopLimit <= k) break;\n    vec4 coeff = readTexel((blockOrigin + direction * float(k)) / resolution);\n    sum += wave(delta * float(k)) * coeff;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = dctInverse(gl_FragCoord.xy, resolution, blockSize, lpf);\n}\n";
+
+  var inverseYFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nfloat readTexel(vec2 uv) { return texture2D(inputTexture, uv).x; }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n// 0 = horizontal pass, 1 = vertical pass. Injected by shader provider via patchDefines.\n#define DCTLIVE_IS_VERT 0\n\n// Scalar variant of dctInverse (see dct-inverse.glsl for full documentation).\n// Same math, outputs float instead of vec4. Cheaper for luminance-only reconstruction.\nfloat dctInverseY(vec2 fragCoord, vec2 resolution, int blockSize, float lpf) {\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(N), lpf));\n\n  float delta = mod(dot(direction, fragCoord), float(blockSize)) / float(N) * PI;\n\n  float sum = 0.0;\n  for (int k = 0; k < 1024; k++) {\n    if (loopLimit <= k) break;\n    float coeff = readTexel((blockOrigin + direction * float(k)) / resolution);\n    sum += wave(delta * float(k)) * coeff;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = vec4(dctInverseY(gl_FragCoord.xy, resolution, blockSize, lpf), 0.0, 0.0, 1.0);\n}\n";
+
+  var quantizeFrag = "precision highp float;\n#define GLSLIFY 1\n\n// Round value to the nearest multiple of stepSize.\n// stepSize=0 is safe — clamped to 1e-6 to avoid division by zero.\nfloat quantize(float value, float stepSize) {\n  float s = max(stepSize, 1e-6);\n  return floor(value / s + 0.5) * s;\n}\n\n// Quantize a vec4 DCT coefficient (Y, Cb, Cr, A channels independently).\n// `len` is the Euclidean distance from the block's DC corner to this frequency bin —\n// used to scale the step size up for high-frequency coefficients (mimics JPEG's\n// quantization matrix). highFreqMultiplier amplifies the coefficient itself first.\nvec4 quantizeCoeff(vec4 coeff, float len, float highFreqMultiplier,\n    float qY, float qYf, float qC, float qCf, float qA, float qAf) {\n  coeff *= 1.0 + len * highFreqMultiplier;\n\n  coeff.x = quantize(coeff.x, qY + qYf * len);\n  coeff.y = quantize(coeff.y, qC + qCf * len);\n  coeff.z = quantize(coeff.z, qC + qCf * len);\n  coeff.w = quantize(coeff.w, qA + qAf * len);\n\n  return coeff;\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  vec4 coeff = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  gl_FragColor = quantizeCoeff(coeff, len, highFreqMultiplier,\n    quantizeY, quantizeYf, quantizeC, quantizeCf, quantizeA, quantizeAf);\n}\n";
+
+  var quantizeYFrag = "precision highp float;\n#define GLSLIFY 1\n\n// Round value to the nearest multiple of stepSize.\n// stepSize=0 is safe — clamped to 1e-6 to avoid division by zero.\nfloat quantize(float value, float stepSize) {\n  float s = max(stepSize, 1e-6);\n  return floor(value / s + 0.5) * s;\n}\n\n// Quantize a single float luminance DCT coefficient.\n// Scalar version of quantizeCoeff — used in Y-only mode where chroma/alpha are absent.\nfloat quantizeCoeffY(float lum, float len, float highFreqMultiplier, float qY, float qYf) {\n  lum *= 1.0 + len * highFreqMultiplier;\n  return quantize(lum, qY + qYf * len);\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  float lum = texture2D(inputTexture, gl_FragCoord.xy / resolution).x;\n  gl_FragColor = vec4(quantizeCoeffY(lum, len, highFreqMultiplier, quantizeY, quantizeYf), 0.0, 0.0, 1.0);\n}\n";
+
+  var colorInColor = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601: convert linear RGB (0–1) to YCbCr.\n// Y  = luminance.  Cb = blue-difference chroma.  Cr = red-difference chroma.\n// The chroma channels are centred on zero (neutral grey = 0, not 0.5).\nvec3 rgb2ycbcr(vec3 rgb) {\n  return vec3(\n     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,\n    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,\n     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b\n  );\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec4 color = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  color.rgb = rgb2ycbcr(color.rgb);\n  gl_FragColor = rgbmEncode(color);\n}\n";
+
+  var colorInY = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601: convert linear RGB (0–1) to YCbCr.\n// Y  = luminance.  Cb = blue-difference chroma.  Cr = red-difference chroma.\n// The chroma channels are centred on zero (neutral grey = 0, not 0.5).\nvec3 rgb2ycbcr(vec3 rgb) {\n  return vec3(\n     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,\n    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,\n     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b\n  );\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec4 color = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  float y = rgb2ycbcr(color.rgb).x;\n  gl_FragColor = ymEncode(y);\n}\n";
+
+  var colorOutColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// ITU-R BT.601 inverse: YCbCr → linear RGB.\n// Exact inverse of rgb2ycbcr — chroma channels are zero-centred.\nvec3 ycbcr2rgb(vec3 yuv) {\n  return vec3(\n    yuv.x + 1.402    * yuv.z,\n    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,\n    yuv.x + 1.772    * yuv.y\n  );\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\n#define DCTLIVE_FLIP_UV 0\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  #if DCTLIVE_FLIP_UV == 1\n  uv.y = 1.0 - uv.y;\n  #endif\n  vec4 color = rgbmDecode(texture2D(inputTexture, uv));\n  color.rgb = ycbcr2rgb(color.rgb);\n  gl_FragColor = color;\n}\n";
+
+  var colorOutY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\n#define DCTLIVE_FLIP_UV 0\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  #if DCTLIVE_FLIP_UV == 1\n  uv.y = 1.0 - uv.y;\n  #endif\n  float lum = ymDecode(texture2D(inputTexture, uv));\n  gl_FragColor = vec4(lum, lum, lum, 1.0);\n}\n";
+
+  var fwdColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nvec4 readTexel(vec2 uv) { return rgbmDecode(texture2D(inputTexture, uv)); }\n\n#define PI 3.14159265\n#define DCTLIVE_IS_VERT 0\n\n// 1D forward DCT: compute one frequency coefficient F[k] for a spatial block.\n//\n// This fragment's output position determines which frequency bin it represents.\n// Formula: F[k] = scale * Σ(n=0..N-1) x[n] * cos((n+0.5)*k*π/N)\n//   k: frequency index (0=DC, 1..N-1=harmonics) within the block\n//   x[n]: input sample at spatial position n in the block\n//   N: effective block size (clamped to image boundary)\n//   scale: DCT-II orthonormal factor (1/N for DC, 2/N for harmonics)\n//\n// Injected by caller:\n//   readTexel(vec2 uv) -> vec4  -- read input sample; handles any codec wrapping (see 8 bit versions)\nvec4 dctForward(vec2 fragCoord, vec2 resolution, int blockSize) {\n  // Scan direction: horizontal (freq along x) or vertical (freq along y)\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  // Locate the block containing this fragment.\n  // blockStride: distance (in texels) between consecutive block starts in this direction\n  // blockCorner: position of the top-left corner of this fragment's block\n  // N: effective block size, clamped to image boundary (may be < blockSize at edges)\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockCorner = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockCorner + 0.5)));\n\n  // Compute this fragment's frequency index (0 to N-1), then scale to [0, π]\n  float freq = floor(mod(dot(direction, fragCoord), float(blockSize))) / float(N) * PI;\n\n  // DCT-II orthonormal scaling: 1/N for DC (freq≈0), 2/N for harmonics.\n  // Using branchless step() to avoid GPU branch prediction penalty.\n  float scale = (1.0 + step(0.001, abs(freq))) / float(N);\n\n  vec4 sum = vec4(0.0);\n  for (int n = 0; n < 1024; n++) {\n    if (N <= n) break;\n    vec2 sampleUv = (blockCorner + float(n) * direction) / resolution;\n    float basis = cos((float(n) + 0.5) * freq);\n    sum += basis * scale * readTexel(sampleUv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = rgbmEncode(dctForward(gl_FragCoord.xy, resolution, blockSize));\n}\n";
+
+  var fwdY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nfloat readTexel(vec2 uv) { return ymDecode(texture2D(inputTexture, uv)); }\n\n#define PI 3.14159265\n#define DCTLIVE_IS_VERT 0\n\n// Scalar variant of dctForward (see dct-forward.glsl for full documentation).\n// Same math, outputs float instead of vec4. Cheaper for luminance-only processing.\nfloat dctForwardY(vec2 fragCoord, vec2 resolution, int blockSize) {\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockCorner = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockCorner + 0.5)));\n\n  float k = floor(mod(dot(direction, fragCoord), float(blockSize))) / float(N) * PI;\n  float scale = (1.0 + step(0.001, abs(k))) / float(N);\n\n  float sum = 0.0;\n  for (int n = 0; n < 1024; n++) {\n    if (N <= n) break;\n    vec2 sampleUv = (blockCorner + float(n) * direction) / resolution;\n    float basis = cos((float(n) + 0.5) * k);\n    sum += basis * scale * readTexel(sampleUv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = ymEncode(dctForwardY(gl_FragCoord.xy, resolution, blockSize));\n}\n";
+
+  var invColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nvec4 readTexel(vec2 uv) { return rgbmDecode(texture2D(inputTexture, uv)); }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n// 0 = horizontal pass, 1 = vertical pass. Injected by shader provider via patchDefines.\n#define DCTLIVE_IS_VERT 0\n\n// 1D inverse DCT: reconstruct one spatial output pixel from frequency coefficients.\n//\n// This fragment's output position determines which spatial position it reconstructs.\n// Formula: x[delta] = Σ(k=0..N-1) F[k] * wave(delta*k*π/N)\n//   delta: spatial position within block (0 to N-1), read from fragment position\n//   F[k]: frequency coefficient at index k (read from input texture)\n//   N: effective block size (clamped to image boundary)\n//   wave(angle): reconstruction basis function (normally cos for DCT-II)\n//   lpf: low-pass filter limit (only sum k from 0 to min(lpf, N-1))\n//\n// Injected by caller:\n//   readTexel(vec2 uv) -> vec4  -- read coefficient; handles any codec wrapping (see 8 bit versions)\n//   wave(float angle) -> float  -- the reconstruction basis function, cos() by default\nvec4 dctInverse(vec2 fragCoord, vec2 resolution, int blockSize, float lpf) {\n  // Scan direction: horizontal (reconstruct spatial X) or vertical (reconstruct spatial Y)\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  // Locate the block containing this fragment.\n  // blockStride: distance (in texels) between consecutive block starts in this direction\n  // blockOrigin: position of the top-left corner of this fragment's block\n  // N: effective block size, clamped to image boundary (may be < blockSize at edges)\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockOrigin + 0.5)));\n\n  // Limit reconstruction to the first `loopLimit` frequency bins (low-pass filter).\n  // loopLimit = 1: DC only. loopLimit = N: full reconstruction.\n  int loopLimit = int(min(float(N), lpf));\n\n  // This fragment's spatial position within its block (0 to N-1), scaled to [0, π]\n  float delta = mod(dot(direction, fragCoord), float(blockSize)) / float(N) * PI;\n\n  vec4 sum = vec4(0.0);\n  for (int k = 0; k < 1024; k++) {\n    if (loopLimit <= k) break;\n    vec4 coeff = readTexel((blockOrigin + direction * float(k)) / resolution);\n    sum += wave(delta * float(k)) * coeff;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = rgbmEncode(dctInverse(gl_FragCoord.xy, resolution, blockSize, lpf));\n}\n";
+
+  var invY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nfloat readTexel(vec2 uv) { return ymDecode(texture2D(inputTexture, uv)); }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n// 0 = horizontal pass, 1 = vertical pass. Injected by shader provider via patchDefines.\n#define DCTLIVE_IS_VERT 0\n\n// Scalar variant of dctInverse (see dct-inverse.glsl for full documentation).\n// Same math, outputs float instead of vec4. Cheaper for luminance-only reconstruction.\nfloat dctInverseY(vec2 fragCoord, vec2 resolution, int blockSize, float lpf) {\n  #if DCTLIVE_IS_VERT == 1\n  vec2 direction = vec2(0.0, 1.0);\n  #else\n  vec2 direction = vec2(1.0, 0.0);\n  #endif\n\n  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / blockStride) * blockStride;\n  int N = int(min(float(blockSize), dot(direction, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(N), lpf));\n\n  float delta = mod(dot(direction, fragCoord), float(blockSize)) / float(N) * PI;\n\n  float sum = 0.0;\n  for (int k = 0; k < 1024; k++) {\n    if (loopLimit <= k) break;\n    float coeff = readTexel((blockOrigin + direction * float(k)) / resolution);\n    sum += wave(delta * float(k)) * coeff;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = ymEncode(dctInverseY(gl_FragCoord.xy, resolution, blockSize, lpf));\n}\n";
+
+  var quantColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\n// Round value to the nearest multiple of stepSize.\n// stepSize=0 is safe — clamped to 1e-6 to avoid division by zero.\nfloat quantize(float value, float stepSize) {\n  float s = max(stepSize, 1e-6);\n  return floor(value / s + 0.5) * s;\n}\n\n// Quantize a vec4 DCT coefficient (Y, Cb, Cr, A channels independently).\n// `len` is the Euclidean distance from the block's DC corner to this frequency bin —\n// used to scale the step size up for high-frequency coefficients (mimics JPEG's\n// quantization matrix). highFreqMultiplier amplifies the coefficient itself first.\nvec4 quantizeCoeff(vec4 coeff, float len, float highFreqMultiplier,\n    float qY, float qYf, float qC, float qCf, float qA, float qAf) {\n  coeff *= 1.0 + len * highFreqMultiplier;\n\n  coeff.x = quantize(coeff.x, qY + qYf * len);\n  coeff.y = quantize(coeff.y, qC + qCf * len);\n  coeff.z = quantize(coeff.z, qC + qCf * len);\n  coeff.w = quantize(coeff.w, qA + qAf * len);\n\n  return coeff;\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  vec4 coeff = rgbmDecode(texture2D(inputTexture, gl_FragCoord.xy / resolution));\n  gl_FragColor = rgbmEncode(quantizeCoeff(coeff, len, highFreqMultiplier,\n    quantizeY, quantizeYf, quantizeC, quantizeCf, quantizeA, quantizeAf));\n}\n";
+
+  var quantY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\n// Round value to the nearest multiple of stepSize.\n// stepSize=0 is safe — clamped to 1e-6 to avoid division by zero.\nfloat quantize(float value, float stepSize) {\n  float s = max(stepSize, 1e-6);\n  return floor(value / s + 0.5) * s;\n}\n\n// Quantize a single float luminance DCT coefficient.\n// Scalar version of quantizeCoeff — used in Y-only mode where chroma/alpha are absent.\nfloat quantizeCoeffY(float lum, float len, float highFreqMultiplier, float qY, float qYf) {\n  lum *= 1.0 + len * highFreqMultiplier;\n  return quantize(lum, qY + qYf * len);\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  float lum = ymDecode(texture2D(inputTexture, gl_FragCoord.xy / resolution));\n  gl_FragColor = ymEncode(quantizeCoeffY(lum, len, highFreqMultiplier, quantizeY, quantizeYf));\n}\n";
+
   const DEFAULT_WAVE_BODY = 'return cos(angle);';
 
-  function flipDefine(fragSrc) {
-    return fragSrc.replace('#define DCTLIVE_FLIP_UV 0', '#define DCTLIVE_FLIP_UV 1');
+  function patchDefines(src, defines) {
+    let result = src;
+    for (const [name, value] of Object.entries(defines)) {
+      result = result.replace(
+        new RegExp(`#define ${name} [^\\n]*`),
+        `#define ${name} ${value}`
+      );
+    }
+    return result;
   }
 
-  // Patch the DCTLIVE_WAVE_BODY define in a glslified inverse shader source.
-  // Using a #define (rather than replacing the function body directly) means the
-  // target is a preprocessor directive — glslify never renames these, so the
-  // pattern is stable across shader refactors.
-  function buildInverseSource(templateSrc, waveBody) {
-    const pattern = /#define DCTLIVE_WAVE_BODY [^\n]*/;
-    if (!pattern.test(templateSrc)) {
-      throw new Error('DCTLive: could not locate DCTLIVE_WAVE_BODY define in inverse shader');
-    }
-    return templateSrc.replace(pattern, `#define DCTLIVE_WAVE_BODY ${waveBody}`);
+  const BLIT_SOURCES = {
+    clamp:  blitClampFrag,
+    repeat: blitRepeatFrag,
+    mirror: blitMirrorFrag,
+    mask:   blitMaskFrag,
+  };
+
+  class FloatShaderProvider {
+    yOnly    = false;
+    waveBody = DEFAULT_WAVE_BODY;
+
+    // Infrastructure — same for all pipelines
+    get vert()             { return quadVert; }
+    get blit()             { return BLIT_SOURCES; }
+    get passthrough()      { return passthroughFrag; }
+    get passthroughFlipY() { return patchDefines(passthroughFrag, { DCTLIVE_FLIP_UV: 1 }); }
+
+    // Color conversion
+    get colorIn()          { return colorInFrag; }
+    get colorOut()         { return this.yOnly ? patchDefines(colorOutFrag, { DCTLIVE_Y_ONLY: 1 }) : colorOutFrag; }
+    get colorOutFlipY()    { return patchDefines(this.colorOut, { DCTLIVE_FLIP_UV: 1 }); }
+
+    // Forward DCT — yOnly selects scalar vs vec4 math
+    get _fwdSrc()          { return this.yOnly ? forwardYFrag : forwardFrag; }
+    get forwardH()         { return this._fwdSrc; }
+    get forwardV()         { return patchDefines(this._fwdSrc, { DCTLIVE_IS_VERT: 1 }); }
+
+    // Inverse DCT — yOnly selects template, waveBody is patched in
+    get _invSrc()          { return this.yOnly ? inverseYFrag : inverseFrag; }
+    get inverseH()         { return patchDefines(this._invSrc, { DCTLIVE_WAVE_BODY: this.waveBody }); }
+    get inverseV()         { return patchDefines(this._invSrc, { DCTLIVE_WAVE_BODY: this.waveBody, DCTLIVE_IS_VERT: 1 }); }
+
+    // Quantize
+    get quantize()         { return this.yOnly ? quantizeYFrag : quantizeFrag; }
+  }
+
+  class Bit8ShaderProvider {
+    yOnly    = false;
+    waveBody = DEFAULT_WAVE_BODY;
+
+    // Infrastructure — same for all pipelines
+    get vert()             { return quadVert; }
+    get blit()             { return BLIT_SOURCES; }
+    get passthrough()      { return passthroughFrag; }
+    get passthroughFlipY() { return patchDefines(passthroughFrag, { DCTLIVE_FLIP_UV: 1 }); }
+
+    // Color conversion
+    get colorIn()          { return this.yOnly ? colorInY    : colorInColor; }
+    get colorOut()         { return this.yOnly ? colorOutY   : colorOutColor; }
+    get colorOutFlipY()    { return patchDefines(this.colorOut, { DCTLIVE_FLIP_UV: 1 }); }
+
+    // Forward DCT
+    get _fwdSrc()          { return this.yOnly ? fwdY : fwdColor; }
+    get forwardH()         { return this._fwdSrc; }
+    get forwardV()         { return patchDefines(this._fwdSrc, { DCTLIVE_IS_VERT: 1 }); }
+
+    // Inverse DCT
+    get _invSrc()          { return this.yOnly ? invY : invColor; }
+    get inverseH()         { return patchDefines(this._invSrc, { DCTLIVE_WAVE_BODY: this.waveBody }); }
+    get inverseV()         { return patchDefines(this._invSrc, { DCTLIVE_WAVE_BODY: this.waveBody, DCTLIVE_IS_VERT: 1 }); }
+
+    // Quantize
+    get quantize()         { return this.yOnly ? quantY : quantColor; }
   }
 
   class RenderPipeline {
@@ -421,37 +517,22 @@ var DCTLiveModule = (function (exports) {
       this._uniformCache = new Map();
       this._attribCache  = new Map();
 
-      this._passthroughProgram      = buildProgram(gl, quadVert, passthroughFrag);
-      this._passthroughFlipYProgram = buildProgram(gl, quadVert, flipDefine(passthroughFrag));
-
-      this._blitPrograms = {
-        clamp:  buildProgram(gl, quadVert, blitClampFrag),
-        repeat: buildProgram(gl, quadVert, blitRepeatFrag),
-        mirror: buildProgram(gl, quadVert, blitMirrorFrag),
-        mask:   buildProgram(gl, quadVert, blitMaskFrag),
-      };
-
       this._quadBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
-      this._buildPrograms();
+      this._buildStaticPrograms();
+      this._buildPipelinePrograms();
+      this._buildInversePrograms();
       this._createFramebuffers();
     }
 
     destroy() {
       const gl = this.gl;
-
-      this._deletePrograms(
-        this._colorInProgram, this._colorOutProgram, this._colorOutFlipYProgram,
-        this._forwardColorProgram, this._forwardYOnlyProgram,
-        this._inverseColorProgram, this._inverseYOnlyProgram,
-        this._quantizeColorProgram, this._quantizeYOnlyProgram,
-        this._passthroughProgram, this._passthroughFlipYProgram,
-      );
-      for (const prog of Object.values(this._blitPrograms)) this._deletePrograms(prog);
+      this._deleteStaticPrograms();
+      this._deletePipelinePrograms();
+      this._deleteInversePrograms();
       gl.deleteBuffer(this._quadBuffer);
-
       for (const fb of [this._fbBlit, this._fbColor, this._fbTemp, this._fbDCT, this._fbQuantized, this._fbFinal]) {
         gl.deleteFramebuffer(fb.framebuffer);
         gl.deleteTexture(fb.texture);
@@ -469,39 +550,18 @@ var DCTLiveModule = (function (exports) {
     setYOnly(enabled) {
       this._yOnly = enabled;
       this.shaderProvider.yOnly = enabled;
-
-      // Rebuild programs that may have changed based on yOnly state
-      this._deletePrograms(
-        this._colorInProgram, this._colorOutProgram, this._colorOutFlipYProgram,
-        this._forwardColorProgram, this._forwardYOnlyProgram,
-        this._inverseColorProgram, this._inverseYOnlyProgram,
-      );
-      this._buildPrograms();
-
-      // Restore wave function if non-default
-      if (this._waveBody !== DEFAULT_WAVE_BODY) {
-        this._deletePrograms(this._inverseColorProgram, this._inverseYOnlyProgram);
-        this._inverseColorProgram = buildProgram(this.gl, quadVert, buildInverseSource(this._inverseFragTemplate, this._waveBody));
-        this._inverseYOnlyProgram = buildProgram(this.gl, quadVert, buildInverseSource(this._inverseYFragTemplate, this._waveBody));
-      }
-
-      this._activeFwd = enabled ? this._forwardYOnlyProgram : this._forwardColorProgram;
-      this._activeInv = enabled ? this._inverseYOnlyProgram : this._inverseColorProgram;
+      this._deletePipelinePrograms();
+      this._deleteInversePrograms();
+      this._buildPipelinePrograms();
+      this._buildInversePrograms();
     }
 
     setWaveFunction(glslBody) {
-      // Normalize to single line: collapse whitespace and newlines to prevent multiline define syntax.
       const normalized = glslBody.trim().replace(/\s+/g, ' ');
-      const colorSource = buildInverseSource(this._inverseFragTemplate, normalized);
-      const yOnlySource = buildInverseSource(this._inverseYFragTemplate, normalized);
-
-      this._deletePrograms(this._inverseColorProgram, this._inverseYOnlyProgram);
-
-      this._inverseColorProgram = buildProgram(this.gl, quadVert, colorSource);
-      this._inverseYOnlyProgram = buildProgram(this.gl, quadVert, yOnlySource);
-
-      this._activeInv = this._yOnly ? this._inverseYOnlyProgram : this._inverseColorProgram;
       this._waveBody = normalized;
+      this.shaderProvider.waveBody = normalized;
+      this._deleteInversePrograms();
+      this._buildInversePrograms();
     }
 
     resetWaveFunction() {
@@ -547,8 +607,7 @@ var DCTLiveModule = (function (exports) {
 
       // Stage 4: Quantization (if active, writes to _fbQuantized)
       if (anyDCT && quantizeActive) {
-        const prog = this._yOnly ? this._quantizeYOnlyProgram : this._quantizeColorProgram;
-        this._renderQuantize(prog, inputTex, uniforms);
+        this._renderQuantize(inputTex, uniforms);
         inputTex = this._fbQuantized.texture;
       }
 
@@ -575,7 +634,7 @@ var DCTLiveModule = (function (exports) {
     // ===== 4. PIPELINE STAGE METHODS =====
 
     _runBlit(rawTex, uvScale, uvOffset, wrap) {
-      const prog = this._blitPrograms[wrap] || this._blitPrograms.mask;
+      const prog = this._staticPrograms.blit[wrap] || this._staticPrograms.blit.mask;
       this._executePass({
         program:  prog,
         target:   this._fbBlit.framebuffer,
@@ -591,7 +650,7 @@ var DCTLiveModule = (function (exports) {
 
     _renderColorIn(inputTexture) {
       this._executePass({
-        program:  this._colorInProgram,
+        program:  this._pipelinePrograms.colorIn,
         target:   this._fbColor.framebuffer,
         uniforms: { resolution: this._res },
         textures: { inputTexture },
@@ -600,13 +659,12 @@ var DCTLiveModule = (function (exports) {
 
     _renderForwardDCTHorizontal(inputTex, uniforms) {
       this._executePass({
-        program: this._activeFwd,
-        target: this._fbTemp.framebuffer,
+        program:  this._pipelinePrograms.fwdH,
+        target:   this._fbTemp.framebuffer,
         uniforms: {
           resolution: this._res,
           lpf:       { type: 'float', value: uniforms.lpf },
           blockSize: { type: 'int',   value: uniforms.blockSize },
-          isVert:    { type: 'int',   value: 0 },
         },
         textures: { inputTexture: inputTex },
       });
@@ -614,19 +672,18 @@ var DCTLiveModule = (function (exports) {
 
     _renderForwardDCTVertical(inputTex, uniforms) {
       this._executePass({
-        program: this._activeFwd,
-        target: this._fbDCT.framebuffer,
+        program:  this._pipelinePrograms.fwdV,
+        target:   this._fbDCT.framebuffer,
         uniforms: {
           resolution: this._res,
           lpf:       { type: 'float', value: uniforms.lpf },
           blockSize: { type: 'int',   value: uniforms.blockSize },
-          isVert:    { type: 'int',   value: 1 },
         },
         textures: { inputTexture: inputTex },
       });
     }
 
-    _renderQuantize(program, inputTexture, uniforms) {
+    _renderQuantize(inputTexture, uniforms) {
       const passUniforms = {
         resolution:         this._res,
         blockSize:          { type: 'int',   value: uniforms.blockSize },
@@ -640,20 +697,19 @@ var DCTLiveModule = (function (exports) {
         passUniforms.quantizeA  = { type: 'float', value: uniforms.quantizeA };
         passUniforms.quantizeAf = { type: 'float', value: uniforms.quantizeAf };
       }
-      this._executePass({ program, target: this._fbQuantized.framebuffer, uniforms: passUniforms, textures: { inputTexture } });
+      this._executePass({ program: this._pipelinePrograms.quantize, target: this._fbQuantized.framebuffer, uniforms: passUniforms, textures: { inputTexture } });
     }
 
     _renderInverseDCTHorizontal(inputTex, uniforms) {
       this._executePass({
-        program: this._activeInv,
-        target: this._fbTemp.framebuffer,
+        program:  this._inversePrograms.invH,
+        target:   this._fbTemp.framebuffer,
         uniforms: {
           resolution: this._res,
           lpf:       { type: 'float', value: uniforms.lpf },
           blockSize: { type: 'int',   value: uniforms.blockSize },
           time:      { type: 'float', value: performance.now() / 1000.0 },
           wi:        { type: 'float', value: uniforms.waveInput },
-          isVert:    { type: 'int',   value: 0 },
         },
         textures: { inputTexture: inputTex },
       });
@@ -661,35 +717,33 @@ var DCTLiveModule = (function (exports) {
 
     _renderInverseDCTVertical(inputTex, uniforms) {
       this._executePass({
-        program: this._activeInv,
-        target: this._fbFinal.framebuffer,
+        program:  this._inversePrograms.invV,
+        target:   this._fbFinal.framebuffer,
         uniforms: {
           resolution: this._res,
           lpf:       { type: 'float', value: uniforms.lpf },
           blockSize: { type: 'int',   value: uniforms.blockSize },
           time:      { type: 'float', value: performance.now() / 1000.0 },
           wi:        { type: 'float', value: uniforms.waveInput },
-          isVert:    { type: 'int',   value: 1 },
         },
         textures: { inputTexture: inputTex },
       });
     }
 
     _renderColorOut(inputTexture, flipViewport = false) {
+      const prog = flipViewport ? this._pipelinePrograms.colorOutFlipY : this._pipelinePrograms.colorOut;
       this._executePass({
-        program:  flipViewport ? this._colorOutFlipYProgram : this._colorOutProgram,
+        program:  prog,
         target:   null,
-        uniforms: {
-          resolution: this._res,
-          yOnlyMode:  { type: 'int', value: this._yOnly ? 1 : 0 },
-        },
+        uniforms: { resolution: this._res },
         textures: { inputTexture },
       });
     }
 
     _renderPassthrough(inputTexture, target, flipViewport = false) {
+      const prog = flipViewport ? this._staticPrograms.passthroughFlipY : this._staticPrograms.passthrough;
       this._executePass({
-        program:  flipViewport ? this._passthroughFlipYProgram : this._passthroughProgram,
+        program:  prog,
         target,
         uniforms: { resolution: this._res },
         textures: { inputTexture },
@@ -747,42 +801,69 @@ var DCTLiveModule = (function (exports) {
 
     _deletePrograms(...progs) {
       for (const prog of progs) {
+        if (!prog) continue;
         this.gl.deleteProgram(prog);
         this._uniformCache.delete(prog);
         this._attribCache.delete(prog);
       }
     }
 
-    _buildPrograms() {
-      const gl = this.gl;
+    _buildStaticPrograms() {
       const sh = this.shaderProvider;
+      this._staticPrograms = {
+        blit: Object.fromEntries(
+          Object.entries(sh.blit).map(([k, v]) => [k, buildProgram(this.gl, sh.vert, v)])
+        ),
+        passthrough:      buildProgram(this.gl, sh.vert, sh.passthrough),
+        passthroughFlipY: buildProgram(this.gl, sh.vert, sh.passthroughFlipY),
+      };
+    }
 
-      this._colorInProgram       = buildProgram(gl, quadVert, sh.colorIn);
-      this._colorOutProgram      = buildProgram(gl, quadVert, sh.colorOut);
-      this._colorOutFlipYProgram = buildProgram(gl, quadVert, flipDefine(sh.colorOut));
+    _buildPipelinePrograms() {
+      const sh = this.shaderProvider;
+      this._pipelinePrograms = {
+        colorIn:       buildProgram(this.gl, sh.vert, sh.colorIn),
+        colorOut:      buildProgram(this.gl, sh.vert, sh.colorOut),
+        colorOutFlipY: buildProgram(this.gl, sh.vert, sh.colorOutFlipY),
+        fwdH:          buildProgram(this.gl, sh.vert, sh.forwardH),
+        fwdV:          buildProgram(this.gl, sh.vert, sh.forwardV),
+        quantize:      buildProgram(this.gl, sh.vert, sh.quantize),
+      };
+    }
 
-      this._forwardColorProgram  = buildProgram(gl, quadVert, sh.forward);
-      this._forwardYOnlyProgram  = buildProgram(gl, quadVert, sh.forwardY);
+    _buildInversePrograms() {
+      const sh = this.shaderProvider;
+      this._inversePrograms = {
+        invH: buildProgram(this.gl, sh.vert, sh.inverseH),
+        invV: buildProgram(this.gl, sh.vert, sh.inverseV),
+      };
+    }
 
-      this._inverseFragTemplate  = sh.inverse;
-      this._inverseYFragTemplate = sh.inverseY;
+    _deleteStaticPrograms() {
+      if (!this._staticPrograms) return;
+      for (const prog of Object.values(this._staticPrograms.blit)) this._deletePrograms(prog);
+      this._deletePrograms(this._staticPrograms.passthrough, this._staticPrograms.passthroughFlipY);
+      this._staticPrograms = null;
+    }
 
-      this._inverseColorProgram  = buildProgram(gl, quadVert, buildInverseSource(sh.inverse, DEFAULT_WAVE_BODY));
-      this._inverseYOnlyProgram  = buildProgram(gl, quadVert, buildInverseSource(sh.inverseY, DEFAULT_WAVE_BODY));
+    _deletePipelinePrograms() {
+      if (!this._pipelinePrograms) return;
+      this._deletePrograms(...Object.values(this._pipelinePrograms));
+      this._pipelinePrograms = null;
+    }
 
-      this._quantizeColorProgram = buildProgram(gl, quadVert, sh.quantize);
-      this._quantizeYOnlyProgram = buildProgram(gl, quadVert, sh.quantizeY);
-
-      this._activeFwd = this._forwardColorProgram;
-      this._activeInv = this._inverseColorProgram;
+    _deleteInversePrograms() {
+      if (!this._inversePrograms) return;
+      this._deletePrograms(this._inversePrograms.invH, this._inversePrograms.invV);
+      this._inversePrograms = null;
     }
 
     _createFramebuffers() {
       const gl = this.gl;
       const t = this._texType;
-      this._fbBlit     = createFramebuffer(gl, this.width, this.height, t);
-      this._fbColor   = createFramebuffer(gl, this.width, this.height, t);
-      this._fbTemp     = createFramebuffer(gl, this.width, this.height, t);
+      this._fbBlit      = createFramebuffer(gl, this.width, this.height, t);
+      this._fbColor     = createFramebuffer(gl, this.width, this.height, t);
+      this._fbTemp      = createFramebuffer(gl, this.width, this.height, t);
       this._fbDCT       = createFramebuffer(gl, this.width, this.height, t);
       this._fbQuantized = createFramebuffer(gl, this.width, this.height, t);
       this._fbFinal     = createFramebuffer(gl, this.width, this.height, t);
@@ -949,68 +1030,6 @@ var DCTLiveModule = (function (exports) {
     set fps(value) { this.setFPS(value); }
 
     get frameInterval() { return this._frameInterval; }
-  }
-
-  var colorInFrag = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601: convert linear RGB (0–1) to YCbCr.\n// Y  = luminance.  Cb = blue-difference chroma.  Cr = red-difference chroma.\n// The chroma channels are centred on zero (neutral grey = 0, not 0.5).\nvec3 rgb2ycbcr(vec3 rgb) {\n  return vec3(\n     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,\n    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,\n     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b\n  );\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec4 color = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  color.rgb = rgb2ycbcr(color.rgb);\n  gl_FragColor = color;\n}\n";
-
-  var colorOutFrag = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601 inverse: YCbCr → linear RGB.\n// Exact inverse of rgb2ycbcr — chroma channels are zero-centred.\nvec3 ycbcr2rgb(vec3 yuv) {\n  return vec3(\n    yuv.x + 1.402    * yuv.z,\n    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,\n    yuv.x + 1.772    * yuv.y\n  );\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\nuniform bool yOnlyMode;\n\n#define DCTLIVE_FLIP_UV 0\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  #if DCTLIVE_FLIP_UV == 1\n  uv.y = 1.0 - uv.y;\n  #endif\n  vec4 color = texture2D(inputTexture, uv);\n\n  if (yOnlyMode) {\n    color.rgb = vec3(color.x);\n    color.a = 1.0;\n  } else {\n    color.rgb = ycbcr2rgb(color.rgb);\n  }\n\n  gl_FragColor = color;\n}\n";
-
-  var forwardFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nvec4 readTexel(vec2 uv) { return texture2D(inputTexture, uv); }\n\n#define PI 3.14159265\n\n// 1D forward DCT for one output coefficient (one fragment = one frequency bin).\n// The caller injects readTexel(vec2 uv) → vec4, which handles any codec wrapping.\n//\n// fragCoord: gl_FragCoord.xy of the output fragment\n// isVert:    true = vertical pass (down columns), false = horizontal (across rows)\n// blockSize: DCT block size (e.g. 8)\n//\n// The fragment's position within its block determines which frequency it represents.\n// Its value is the inner product of the block's input samples with the cosine basis:\n//   F[k] = factor * Σ x[n] * cos((n + 0.5) * k*π/N)\n// factor = 1/N for DC (k=0), 2/N otherwise — the standard orthonormal DCT-II scaling.\nvec4 dctForward(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  float freq = floor(mod(dot(bv, fragCoord), float(blockSize))) / float(bs) * PI;\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n    vec2 uv = (blockOrigin + float(i) * bv) / resolution;\n    float w = cos((float(i) + 0.5) * freq);\n    sum += w * factor * readTexel(uv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = dctForward(gl_FragCoord.xy, resolution, isVert, blockSize);\n}\n";
-
-  var forwardYFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nfloat readTexel(vec2 uv) { return texture2D(inputTexture, uv).x; }\n\n#define PI 3.14159265\n\n// 1D forward DCT, scalar (Y-only) variant. Same math as dct-forward.glsl but\n// operates on a single float channel — cheaper inner loop for luminance-only processing.\n// The caller injects readTexel(vec2 uv) → float.\nfloat dctForwardY(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  float freq = floor(mod(dot(bv, fragCoord), float(blockSize))) / float(bs) * PI;\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  float sum = 0.0;\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n    vec2 uv = (blockOrigin + float(i) * bv) / resolution;\n    float w = cos((float(i) + 0.5) * freq);\n    sum += w * factor * readTexel(uv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = vec4(dctForwardY(gl_FragCoord.xy, resolution, isVert, blockSize), 0.0, 0.0, 1.0);\n}\n";
-
-  var inverseFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nvec4 readTexel(vec2 uv) { return texture2D(inputTexture, uv); }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n\n// 1D inverse DCT for one output pixel (one fragment = one spatial position).\n// The caller injects:\n//   readTexel(vec2 uv) -> vec4  -- read a coefficient; handles any codec wrapping\n//   wave(float angle) -> float  -- the reconstruction basis function (normally cos)\n//\n// lpf: low-pass filter limit -- only the first `lpf` frequency bins are summed.\n//   lpf = blockSize: full reconstruction.  lpf = 1: DC only (flat coloured blocks).\n//\n// The fragment's position within its block is `delta` (0 to blockSize-1).\n// Each frequency bin k contributes: F[k] * wave(delta * k * PI / N)\nvec4 dctInverse(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize, float lpf) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  float delta = mod(dot(bv, fragCoord), float(blockSize));\n\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n    float fdelta = float(i);\n    vec4 val = readTexel((blockOrigin + bv * fdelta) / resolution);\n    sum += wave(delta * fdelta / float(bs) * PI) * val;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = dctInverse(gl_FragCoord.xy, resolution, isVert, blockSize, lpf);\n}\n";
-
-  var inverseYFrag = "precision highp float;\n#define GLSLIFY 1\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nfloat readTexel(vec2 uv) { return texture2D(inputTexture, uv).x; }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n\n// 1D inverse DCT, scalar (Y-only) variant. Same math as dct-inverse.glsl but\n// accumulates a single float -- cheaper inner loop for luminance-only reconstruction.\n// The caller injects readTexel(vec2 uv) -> float and wave(float) -> float.\nfloat dctInverseY(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize, float lpf) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  float delta = mod(dot(bv, fragCoord), float(blockSize));\n\n  float sum = 0.0;\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n    float fdelta = float(i);\n    float lum = readTexel((blockOrigin + bv * fdelta) / resolution);\n    sum += wave(delta * fdelta / float(bs) * PI) * lum;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = vec4(dctInverseY(gl_FragCoord.xy, resolution, isVert, blockSize, lpf), 0.0, 0.0, 1.0);\n}\n";
-
-  var quantizeFrag = "precision highp float;\n#define GLSLIFY 1\n\n// Round `value` to the nearest multiple of `step`.\n// step=0 means no quantization (caller should guard against this).\nfloat quantize(float value, float step) {\n  return floor(value / step + 0.5) * step;\n}\n\n// Quantize a vec4 DCT coefficient (Y, Cb, Cr, A channels independently).\n// `len` is the Euclidean distance from the block's DC corner to this frequency bin —\n// used to scale the step size up for high-frequency coefficients (mimics JPEG's\n// quantization matrix). highFreqMultiplier amplifies the coefficient itself first.\nvec4 quantizeCoeff(vec4 coeff, float len, float highFreqMultiplier,\n    float qY, float qYf, float qC, float qCf, float qA, float qAf) {\n  coeff *= 1.0 + len * highFreqMultiplier;\n\n  float stepY = qY + qYf * len;\n  coeff.x = stepY > 0.0 ? quantize(coeff.x, stepY) : coeff.x;\n\n  float stepC = qC + qCf * len;\n  coeff.y = stepC > 0.0 ? quantize(coeff.y, stepC) : coeff.y;\n  coeff.z = stepC > 0.0 ? quantize(coeff.z, stepC) : coeff.z;\n\n  float stepA = qA + qAf * len;\n  coeff.w = stepA > 0.0 ? quantize(coeff.w, stepA) : coeff.w;\n\n  return coeff;\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  vec4 coeff = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  gl_FragColor = quantizeCoeff(coeff, len, highFreqMultiplier,\n    quantizeY, quantizeYf, quantizeC, quantizeCf, quantizeA, quantizeAf);\n}\n";
-
-  var quantizeYFrag = "precision highp float;\n#define GLSLIFY 1\n\n// Round `value` to the nearest multiple of `step`.\n// step=0 means no quantization (caller should guard against this).\nfloat quantize(float value, float step) {\n  return floor(value / step + 0.5) * step;\n}\n\n// Quantize a single float luminance DCT coefficient.\n// Scalar version of quantizeCoeff — used in Y-only mode where chroma/alpha are absent.\nfloat quantizeCoeffY(float lum, float len, float highFreqMultiplier, float qY, float qYf) {\n  lum *= 1.0 + len * highFreqMultiplier;\n  float stepY = qY + qYf * len;\n  return stepY > 0.0 ? quantize(lum, stepY) : lum;\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  float lum = texture2D(inputTexture, gl_FragCoord.xy / resolution).x;\n  gl_FragColor = vec4(quantizeCoeffY(lum, len, highFreqMultiplier, quantizeY, quantizeYf), 0.0, 0.0, 1.0);\n}\n";
-
-  var colorInColor = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601: convert linear RGB (0–1) to YCbCr.\n// Y  = luminance.  Cb = blue-difference chroma.  Cr = red-difference chroma.\n// The chroma channels are centred on zero (neutral grey = 0, not 0.5).\nvec3 rgb2ycbcr(vec3 rgb) {\n  return vec3(\n     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,\n    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,\n     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b\n  );\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec4 color = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  color.rgb = rgb2ycbcr(color.rgb);\n  gl_FragColor = rgbmEncode(color);\n}\n";
-
-  var colorInY = "precision highp float;\n#define GLSLIFY 1\n\n// ITU-R BT.601: convert linear RGB (0–1) to YCbCr.\n// Y  = luminance.  Cb = blue-difference chroma.  Cr = red-difference chroma.\n// The chroma channels are centred on zero (neutral grey = 0, not 0.5).\nvec3 rgb2ycbcr(vec3 rgb) {\n  return vec3(\n     0.299    * rgb.r + 0.587    * rgb.g + 0.114    * rgb.b,\n    -0.148736 * rgb.r - 0.331264 * rgb.g + 0.5      * rgb.b,\n     0.5      * rgb.r - 0.418688 * rgb.g - 0.081312 * rgb.b\n  );\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\nvoid main() {\n  vec4 color = texture2D(inputTexture, gl_FragCoord.xy / resolution);\n  float y = rgb2ycbcr(color.rgb).x;\n  gl_FragColor = ymEncode(y);\n}\n";
-
-  var colorOutColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// ITU-R BT.601 inverse: YCbCr → linear RGB.\n// Exact inverse of rgb2ycbcr — chroma channels are zero-centred.\nvec3 ycbcr2rgb(vec3 yuv) {\n  return vec3(\n    yuv.x + 1.402    * yuv.z,\n    yuv.x - 0.344136 * yuv.y - 0.714136 * yuv.z,\n    yuv.x + 1.772    * yuv.y\n  );\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\n#define DCTLIVE_FLIP_UV 0\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  #if DCTLIVE_FLIP_UV == 1\n  uv.y = 1.0 - uv.y;\n  #endif\n  vec4 color = rgbmDecode(texture2D(inputTexture, uv));\n  color.rgb = ycbcr2rgb(color.rgb);\n  gl_FragColor = color;\n}\n";
-
-  var colorOutY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\nuniform vec2 resolution;\nuniform sampler2D inputTexture;\n\n#define DCTLIVE_FLIP_UV 0\n\nvoid main() {\n  vec2 uv = gl_FragCoord.xy / resolution;\n  #if DCTLIVE_FLIP_UV == 1\n  uv.y = 1.0 - uv.y;\n  #endif\n  float lum = ymDecode(texture2D(inputTexture, uv));\n  gl_FragColor = vec4(lum, lum, lum, 1.0);\n}\n";
-
-  var fwdColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nvec4 readTexel(vec2 uv) { return rgbmDecode(texture2D(inputTexture, uv)); }\n\n#define PI 3.14159265\n\n// 1D forward DCT for one output coefficient (one fragment = one frequency bin).\n// The caller injects readTexel(vec2 uv) → vec4, which handles any codec wrapping.\n//\n// fragCoord: gl_FragCoord.xy of the output fragment\n// isVert:    true = vertical pass (down columns), false = horizontal (across rows)\n// blockSize: DCT block size (e.g. 8)\n//\n// The fragment's position within its block determines which frequency it represents.\n// Its value is the inner product of the block's input samples with the cosine basis:\n//   F[k] = factor * Σ x[n] * cos((n + 0.5) * k*π/N)\n// factor = 1/N for DC (k=0), 2/N otherwise — the standard orthonormal DCT-II scaling.\nvec4 dctForward(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  float freq = floor(mod(dot(bv, fragCoord), float(blockSize))) / float(bs) * PI;\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n    vec2 uv = (blockOrigin + float(i) * bv) / resolution;\n    float w = cos((float(i) + 0.5) * freq);\n    sum += w * factor * readTexel(uv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = rgbmEncode(dctForward(gl_FragCoord.xy, resolution, isVert, blockSize));\n}\n";
-
-  var fwdY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\n\nfloat readTexel(vec2 uv) { return ymDecode(texture2D(inputTexture, uv)); }\n\n#define PI 3.14159265\n\n// 1D forward DCT, scalar (Y-only) variant. Same math as dct-forward.glsl but\n// operates on a single float channel — cheaper inner loop for luminance-only processing.\n// The caller injects readTexel(vec2 uv) → float.\nfloat dctForwardY(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n\n  float freq = floor(mod(dot(bv, fragCoord), float(blockSize))) / float(bs) * PI;\n  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);\n\n  float sum = 0.0;\n  for (int i = 0; i < 1024; i++) {\n    if (bs <= i) break;\n    vec2 uv = (blockOrigin + float(i) * bv) / resolution;\n    float w = cos((float(i) + 0.5) * freq);\n    sum += w * factor * readTexel(uv);\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = ymEncode(dctForwardY(gl_FragCoord.xy, resolution, isVert, blockSize));\n}\n";
-
-  var invColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nvec4 readTexel(vec2 uv) { return rgbmDecode(texture2D(inputTexture, uv)); }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n\n// 1D inverse DCT for one output pixel (one fragment = one spatial position).\n// The caller injects:\n//   readTexel(vec2 uv) -> vec4  -- read a coefficient; handles any codec wrapping\n//   wave(float angle) -> float  -- the reconstruction basis function (normally cos)\n//\n// lpf: low-pass filter limit -- only the first `lpf` frequency bins are summed.\n//   lpf = blockSize: full reconstruction.  lpf = 1: DC only (flat coloured blocks).\n//\n// The fragment's position within its block is `delta` (0 to blockSize-1).\n// Each frequency bin k contributes: F[k] * wave(delta * k * PI / N)\nvec4 dctInverse(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize, float lpf) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  float delta = mod(dot(bv, fragCoord), float(blockSize));\n\n  vec4 sum = vec4(0.0);\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n    float fdelta = float(i);\n    vec4 val = readTexel((blockOrigin + bv * fdelta) / resolution);\n    sum += wave(delta * fdelta / float(bs) * PI) * val;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = rgbmEncode(dctInverse(gl_FragCoord.xy, resolution, isVert, blockSize, lpf));\n}\n";
-
-  var invY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\nuniform vec2 resolution;\nuniform bool isVert;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float lpf;\nuniform float time;\nuniform float wi;\n\nfloat readTexel(vec2 uv) { return ymDecode(texture2D(inputTexture, uv)); }\n\n// DCTLIVE_WAVE_BODY is replaced at runtime by setWaveFunction().\n#define DCTLIVE_WAVE_BODY return cos(angle);\nfloat wave(float angle) { DCTLIVE_WAVE_BODY }\n\n#define PI 3.14159265\n\n// 1D inverse DCT, scalar (Y-only) variant. Same math as dct-inverse.glsl but\n// accumulates a single float -- cheaper inner loop for luminance-only reconstruction.\n// The caller injects readTexel(vec2 uv) -> float and wave(float) -> float.\nfloat dctInverseY(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize, float lpf) {\n  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);\n  vec2 block = bv * float(blockSize - 1) + vec2(1.0);\n  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;\n  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));\n  int loopLimit = int(min(float(bs), lpf));\n\n  float delta = mod(dot(bv, fragCoord), float(blockSize));\n\n  float sum = 0.0;\n  for (int i = 0; i < 1024; i++) {\n    if (loopLimit <= i) break;\n    float fdelta = float(i);\n    float lum = readTexel((blockOrigin + bv * fdelta) / resolution);\n    sum += wave(delta * fdelta / float(bs) * PI) * lum;\n  }\n  return sum;\n}\n\nvoid main() {\n  gl_FragColor = ymEncode(dctInverseY(gl_FragCoord.xy, resolution, isVert, blockSize, lpf));\n}\n";
-
-  var quantColor = "precision highp float;\n#define GLSLIFY 1\n\n// Decode an RGBM-encoded vec4 back to its original high-range values.\n// Reverses rgbmEncode: undo the [0,1] remap, undo sqrt-companding, rescale by M.\n#define RGBM_MAX 4.0\n\nvec4 rgbmDecode(vec4 enc) {\n  float mv = enc.w * enc.w * RGBM_MAX;      // recover scale from alpha\n  vec3 cmp = enc.xyz * 2.0 - 1.0;           // undo [0,1] remap → [-1,1]\n  return vec4((cmp * abs(cmp)) * mv, 1.0);  // undo sqrt-compand, rescale\n}\n\n// RGBM encoding: pack a high-range vec4 into 8-bit RGBA.\n//\n// The three colour channels are normalized by their maximum absolute value (the \"M\"),\n// then sqrt-companded to concentrate precision near zero.\n// The scale factor M is stored in alpha after its own sqrt-compand.\n//\n// RGBM_MAX is the assumed coefficient ceiling — values above it clamp.\n// The DCT normalization factor (2/blockSize) keeps coefficients bounded regardless\n// of block size, so RGBM_MAX = 4.0 is safe across all block sizes.\n//\n// Decode with rgbmDecode.\n#define RGBM_MAX 4.0\n\nvec4 rgbmEncode(vec4 val) {\n  float mv = max(max(abs(val.x), abs(val.y)), abs(val.z));\n  mv = clamp(mv, 0.01, RGBM_MAX);\n  vec3 nrm = val.xyz / mv;\n  // sqrt-compand + remap to [0,1] for unsigned 8-bit storage\n  return vec4((sign(nrm) * sqrt(abs(nrm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX));\n}\n\n// Round `value` to the nearest multiple of `step`.\n// step=0 means no quantization (caller should guard against this).\nfloat quantize(float value, float step) {\n  return floor(value / step + 0.5) * step;\n}\n\n// Quantize a vec4 DCT coefficient (Y, Cb, Cr, A channels independently).\n// `len` is the Euclidean distance from the block's DC corner to this frequency bin —\n// used to scale the step size up for high-frequency coefficients (mimics JPEG's\n// quantization matrix). highFreqMultiplier amplifies the coefficient itself first.\nvec4 quantizeCoeff(vec4 coeff, float len, float highFreqMultiplier,\n    float qY, float qYf, float qC, float qCf, float qA, float qAf) {\n  coeff *= 1.0 + len * highFreqMultiplier;\n\n  float stepY = qY + qYf * len;\n  coeff.x = stepY > 0.0 ? quantize(coeff.x, stepY) : coeff.x;\n\n  float stepC = qC + qCf * len;\n  coeff.y = stepC > 0.0 ? quantize(coeff.y, stepC) : coeff.y;\n  coeff.z = stepC > 0.0 ? quantize(coeff.z, stepC) : coeff.z;\n\n  float stepA = qA + qAf * len;\n  coeff.w = stepA > 0.0 ? quantize(coeff.w, stepA) : coeff.w;\n\n  return coeff;\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\nuniform float quantizeC;\nuniform float quantizeCf;\nuniform float quantizeA;\nuniform float quantizeAf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  vec4 coeff = rgbmDecode(texture2D(inputTexture, gl_FragCoord.xy / resolution));\n  gl_FragColor = rgbmEncode(quantizeCoeff(coeff, len, highFreqMultiplier,\n    quantizeY, quantizeYf, quantizeC, quantizeCf, quantizeA, quantizeAf));\n}\n";
-
-  var quantY = "precision highp float;\n#define GLSLIFY 1\n\n// Decode a YM-encoded vec4 back to a single float.\n// Reverses ymEncode: read R (companded value) and G (scale), reconstruct the original.\n#define RGBM_MAX 4.0\n\nfloat ymDecode(vec4 enc) {\n  float mv = enc.y * enc.y * RGBM_MAX;  // recover scale from G channel\n  float cmp = enc.x * 2.0 - 1.0;       // undo [0,1] remap → [-1,1]\n  return (cmp * abs(cmp)) * mv;         // undo sqrt-compand, rescale\n}\n\n// YM encoding: pack a single high-range float into R+G channels of an 8-bit vec4.\n// Same companding as RGBM but for one channel: R = sqrt-companded value, G = scale.\n// B and A are unused (set to 1.0). Decode with ymDecode.\n#define RGBM_MAX 4.0\n\nvec4 ymEncode(float lum) {\n  float mv = clamp(abs(lum), 0.01, RGBM_MAX);\n  float norm = lum / mv;\n  return vec4((sign(norm) * sqrt(abs(norm))) * 0.5 + 0.5, sqrt(mv / RGBM_MAX), 1.0, 1.0);\n}\n\n// Round `value` to the nearest multiple of `step`.\n// step=0 means no quantization (caller should guard against this).\nfloat quantize(float value, float step) {\n  return floor(value / step + 0.5) * step;\n}\n\n// Quantize a single float luminance DCT coefficient.\n// Scalar version of quantizeCoeff — used in Y-only mode where chroma/alpha are absent.\nfloat quantizeCoeffY(float lum, float len, float highFreqMultiplier, float qY, float qYf) {\n  lum *= 1.0 + len * highFreqMultiplier;\n  float stepY = qY + qYf * len;\n  return stepY > 0.0 ? quantize(lum, stepY) : lum;\n}\n\nuniform vec2 resolution;\nuniform int blockSize;\nuniform sampler2D inputTexture;\nuniform float highFreqMultiplier;\nuniform float quantizeY;\nuniform float quantizeYf;\n\nvoid main() {\n  float len = length(floor(mod(gl_FragCoord.xy, float(blockSize))));\n  float lum = ymDecode(texture2D(inputTexture, gl_FragCoord.xy / resolution));\n  gl_FragColor = ymEncode(quantizeCoeffY(lum, len, highFreqMultiplier, quantizeY, quantizeYf));\n}\n";
-
-  class FloatShaderProvider {
-    yOnly = false;
-
-    get colorIn()   { return colorInFrag; }
-    get colorOut()  { return colorOutFrag; }
-    get forward()   { return forwardFrag; }
-    get forwardY()  { return forwardYFrag; }
-    get inverse()   { return inverseFrag; }
-    get inverseY()  { return inverseYFrag; }
-    get quantize()  { return quantizeFrag; }
-    get quantizeY() { return quantizeYFrag; }
-  }
-
-  class Bit8ShaderProvider {
-    yOnly = false;
-
-    get colorIn()   { return this.yOnly ? colorInY    : colorInColor; }
-    get colorOut()  { return this.yOnly ? colorOutY   : colorOutColor; }
-    get forward()   { return this.yOnly ? fwdY        : fwdColor; }
-    get forwardY()  { return this.yOnly ? fwdY        : fwdColor; }
-    get inverse()   { return this.yOnly ? invY        : invColor; }
-    get inverseY()  { return this.yOnly ? invY        : invColor; }
-    get quantize()  { return this.yOnly ? quantY      : quantColor; }
-    get quantizeY() { return quantY; }
   }
 
   /**

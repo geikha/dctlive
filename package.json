@@ -37,6 +37,7 @@
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.0",
     "@rollup/plugin-node-resolve": "^16.0.0",
+    "gl": "^8.1.6",
     "glslify": "^7.1.1",
     "playwright": "^1.60.0",
     "rollup": "^4.0.0",

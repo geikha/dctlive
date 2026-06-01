@@ -1,31 +1,46 @@
 #define PI 3.14159265
+#define DCTLIVE_IS_VERT 0
 
-// 1D forward DCT for one output coefficient (one fragment = one frequency bin).
-// The caller injects readTexel(vec2 uv) → vec4, which handles any codec wrapping.
+// 1D forward DCT: compute one frequency coefficient F[k] for a spatial block.
 //
-// fragCoord: gl_FragCoord.xy of the output fragment
-// isVert:    true = vertical pass (down columns), false = horizontal (across rows)
-// blockSize: DCT block size (e.g. 8)
+// This fragment's output position determines which frequency bin it represents.
+// Formula: F[k] = scale * Σ(n=0..N-1) x[n] * cos((n+0.5)*k*π/N)
+//   k: frequency index (0=DC, 1..N-1=harmonics) within the block
+//   x[n]: input sample at spatial position n in the block
+//   N: effective block size (clamped to image boundary)
+//   scale: DCT-II orthonormal factor (1/N for DC, 2/N for harmonics)
 //
-// The fragment's position within its block determines which frequency it represents.
-// Its value is the inner product of the block's input samples with the cosine basis:
-//   F[k] = factor * Σ x[n] * cos((n + 0.5) * k*π/N)
-// factor = 1/N for DC (k=0), 2/N otherwise — the standard orthonormal DCT-II scaling.
-vec4 dctForward(vec2 fragCoord, vec2 resolution, bool isVert, int blockSize) {
-  vec2 bv = isVert ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
-  vec2 block = bv * float(blockSize - 1) + vec2(1.0);
-  vec2 blockOrigin = 0.5 + floor(fragCoord / block) * block;
-  int bs = int(min(float(blockSize), dot(bv, resolution - blockOrigin + 0.5)));
+// Injected by caller:
+//   readTexel(vec2 uv) -> vec4  -- read input sample; handles any codec wrapping (see 8 bit versions)
+vec4 dctForward(vec2 fragCoord, vec2 resolution, int blockSize) {
+  // Scan direction: horizontal (freq along x) or vertical (freq along y)
+  #if DCTLIVE_IS_VERT == 1
+  vec2 direction = vec2(0.0, 1.0);
+  #else
+  vec2 direction = vec2(1.0, 0.0);
+  #endif
 
-  float freq = floor(mod(dot(bv, fragCoord), float(blockSize))) / float(bs) * PI;
-  float factor = (freq == 0.0 ? 1.0 : 2.0) / float(bs);
+  // Locate the block containing this fragment.
+  // blockStride: distance (in texels) between consecutive block starts in this direction
+  // blockCorner: position of the top-left corner of this fragment's block
+  // N: effective block size, clamped to image boundary (may be < blockSize at edges)
+  vec2 blockStride = direction * float(blockSize - 1) + vec2(1.0);
+  vec2 blockCorner = 0.5 + floor(fragCoord / blockStride) * blockStride;
+  int N = int(min(float(blockSize), dot(direction, resolution - blockCorner + 0.5)));
+
+  // Compute this fragment's frequency index (0 to N-1), then scale to [0, π]
+  float freq = floor(mod(dot(direction, fragCoord), float(blockSize))) / float(N) * PI;
+
+  // DCT-II orthonormal scaling: 1/N for DC (freq≈0), 2/N for harmonics.
+  // Using branchless step() to avoid GPU branch prediction penalty.
+  float scale = (1.0 + step(0.001, abs(freq))) / float(N);
 
   vec4 sum = vec4(0.0);
-  for (int i = 0; i < 1024; i++) {
-    if (bs <= i) break;
-    vec2 uv = (blockOrigin + float(i) * bv) / resolution;
-    float w = cos((float(i) + 0.5) * freq);
-    sum += w * factor * readTexel(uv);
+  for (int n = 0; n < 1024; n++) {
+    if (N <= n) break;
+    vec2 sampleUv = (blockCorner + float(n) * direction) / resolution;
+    float basis = cos((float(n) + 0.5) * freq);
+    sum += basis * scale * readTexel(sampleUv);
   }
   return sum;
 }
