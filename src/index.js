@@ -2,9 +2,7 @@
  * DCTLive — WebGL implementation of JPEG-like DCT.
  *
  * Design & API: geikha
- * Implementation: Claude Code
  * DCT shader reference: FMS-Cat (https://www.youtube.com/watch?v=xt4UFRPqX_w)
- * Guidance: sol sarratea (https://solsarratea.world/)
  *
  * Usage:
  *   const dct = new DCTLive({ width: 512, height: 512, loop: true });
@@ -58,6 +56,7 @@ export default class DCTLive {
     this._pipeline = new RenderPipeline(gl, this.width, this.height, texType, shaderProvider);
     this._display = new DisplayController(this.canvas);
     this._config = new ShaderConfig();
+    this.input = new InputSource(gl, this.width, this.height);
 
     // DCT/IDCT pass control
     this.dctHorizontal  = true;
@@ -65,274 +64,10 @@ export default class DCTLive {
     this.idctHorizontal = true;
     this.idctVertical   = true;
 
-    this.input = new InputSource(gl, this.width, this.height);
-
-    // Shorthand properties (e.g. dct.qY) that proxy to the uniform store.
-    // Note: quantize uniforms (qY, qC, etc.) are squared before reaching the shader —
-    // user input of 0–1 maps to a quadratic curve for perceptual control.
-    this._defineShorthandProperties();
-
     this._autoLoop = opts.loop !== false;
   }
 
-  _defineShorthandProperties() {
-    const shorthandMap = {
-      qY: 'quantizeY',
-      qYf: 'quantizeYf',
-      qC: 'quantizeC',
-      qCf: 'quantizeCf',
-      qA: 'quantizeA',
-      qAf: 'quantizeAf',
-      hfreq: 'highFreqMultiplier',
-      blockSize: 'blockSize',
-      lpf: 'lpf',
-      waveInput: 'waveInput',
-    };
-
-    for (const [shorthand, fullName] of Object.entries(shorthandMap)) {
-      Object.defineProperty(this, shorthand, {
-        get: () => this._config.uniforms[fullName],
-        set: (value) => { this._config.uniforms[fullName] = value; },
-        enumerable: true,
-        configurable: true,
-      });
-    }
-
-    // yOnly has special behaviour: swaps shader programs in the pipeline
-    Object.defineProperty(this, 'yOnly', {
-      get: () => this._config.uniforms.yOnly,
-      set: (value) => {
-        this._config.uniforms.yOnly = value;
-        this._pipeline.setYOnly(value);
-      },
-      enumerable: true,
-      configurable: true,
-    });
-  }
-
-  // ---- Public getters — delegate to internal modules ----
-
-  get uniforms()   { return this._config.uniforms; }
-  get precision()  { return this._precision; }
-
-  get flipY()      { return this._display.flipY; }
-  set flipY(value) {
-    this._display.flipY = value;
-    this.input.flipY = value;
-  }
-
-  get fps()        { return this._config.fps; }
-  set fps(value)   { this._config.fps = value; }
-
-  // ---- Image / source loading ----
-
-  /**
-   * Load an image from a URL or set an HTMLImageElement as input.
-   * @param {string|HTMLImageElement} source - URL string or image element
-   * @param {Object} [opts] - { fit, minFilter, magFilter, wrap }
-   * @returns {Promise<void>}
-   */
-  async initImage(source, opts = {}) {
-    try {
-      if (typeof source === 'string') {
-        await this.input.loadImage(source, opts);
-      } else if (source instanceof HTMLImageElement) {
-        this.input.setImage(source, opts);
-      } else {
-        throw new Error('DCTLive.initImage: source must be a URL string or HTMLImageElement');
-      }
-      this.run();
-      if (this._autoLoop) this.start();
-    } catch (err) {
-      console.error('DCTLive.initImage failed:', err);
-    }
-  }
-
-  /**
-   * Load a video from a URL or set an HTMLVideoElement as dynamic input.
-   * @param {string|HTMLVideoElement} source - URL string or video element
-   * @param {Object} [opts] - { fit, minFilter, magFilter, wrap }
-   * @returns {Promise<void>}
-   */
-  async initVideo(source, opts = {}) {
-    try {
-      if (typeof source === 'string') {
-        await new Promise((resolve, reject) => {
-          const video = document.createElement('video');
-          video.src = source;
-          video.crossOrigin = 'anonymous';
-          video.muted = true;
-          video.loop = true;
-          video.playsInline = true;
-
-          const cleanup = () => {
-            video.removeEventListener('loadeddata', onLoaded);
-            video.removeEventListener('error', onError);
-          };
-          const onLoaded = () => {
-            cleanup();
-            this.input.setVideo(video, opts);
-            video.play().catch(() => {});
-            resolve();
-          };
-          const onError = (e) => {
-            cleanup();
-            reject(new Error(`DCTLive.initVideo: failed to load "${source}" — ${e.message || 'unknown error'}`));
-          };
-
-          video.addEventListener('loadeddata', onLoaded);
-          video.addEventListener('error', onError);
-        });
-      } else if (source instanceof HTMLVideoElement) {
-        this.input.setVideo(source, opts);
-      } else {
-        throw new Error('DCTLive.initVideo: source must be a URL string or HTMLVideoElement');
-      }
-      this.run();
-      if (this._autoLoop) this.start();
-    } catch (err) {
-      console.error('DCTLive.initVideo failed:', err);
-    }
-  }
-
-  /**
-   * Set another canvas as dynamic input.
-   * Accepts HTMLCanvasElement, a CanvasRenderingContext2D, or Hydra-style wrapper objects.
-   * @param {HTMLCanvasElement|CanvasRenderingContext2D|Object} canvas
-   * @param {Object} [opts]
-   */
-  async initCanvas(canvas, opts = {}) {
-    try {
-      let targetCanvas = canvas;
-
-      if (canvas && typeof canvas === 'object') {
-        if (canvas instanceof HTMLCanvasElement) {
-          targetCanvas = canvas;
-        } else if (canvas instanceof CanvasRenderingContext2D) {
-          targetCanvas = canvas.canvas;
-        } else if (canvas.src instanceof HTMLCanvasElement) {
-          targetCanvas = canvas.src;
-        } else if (canvas.src instanceof CanvasRenderingContext2D) {
-          targetCanvas = canvas.src.canvas;
-        } else if (canvas.canvas instanceof HTMLCanvasElement) {
-          targetCanvas = canvas.canvas;
-        } else if (canvas.canvas instanceof CanvasRenderingContext2D) {
-          targetCanvas = canvas.canvas.canvas;
-        } else if (typeof canvas.getContext === 'function') {
-          targetCanvas = canvas;
-        }
-      }
-
-      if (!(targetCanvas instanceof HTMLCanvasElement)) {
-        throw new Error('DCTLive.initCanvas: expected an HTMLCanvasElement, CanvasRenderingContext2D, or wrapper object with a canvas source');
-      }
-
-      this.input.setCanvas(targetCanvas, opts);
-      this.run();
-      if (this._autoLoop) this.start();
-    } catch (err) {
-      console.error('DCTLive.initCanvas failed:', err);
-    }
-  }
-
-  /**
-   * Initialize camera input from device camera(s).
-   * @param {number|string} [selector=0] - Camera index (number) or label (string)
-   * @param {Object} [opts] - { constraints }
-   * @returns {Promise<HTMLVideoElement>}
-   */
-  async initCam(selector = 0, opts = {}) {
-    try {
-      async function getCameras() {
-        let devices = await navigator.mediaDevices.enumerateDevices();
-        let cameras = devices.filter((d) => d.kind === 'videoinput');
-        if (!cameras.some((d) => d.deviceId)) {
-          // Permission not yet granted — trigger prompt, stop immediately, re-enumerate
-          const temp = await navigator.mediaDevices.getUserMedia({ video: true });
-          temp.getTracks().forEach((t) => t.stop());
-          devices = await navigator.mediaDevices.enumerateDevices();
-          cameras = devices.filter((d) => d.kind === 'videoinput');
-        }
-        return cameras;
-      }
-
-      const cameras = await getCameras();
-
-      let device;
-      if (typeof selector === 'number') {
-        device = cameras[selector];
-      } else if (typeof selector === 'string') {
-        device = cameras.find((d) => d.label === selector);
-        if (!device) device = cameras.find((d) => d.label.toLowerCase().includes(selector.toLowerCase()));
-      }
-
-      if (!device && cameras.length === 0) {
-        console.warn('DCTLive.initCam: no cameras found');
-        return;
-      }
-
-      const constraints = opts.constraints || {
-        video: device
-          ? { deviceId: { exact: device.deviceId }, width: { ideal: this.width }, height: { ideal: this.height } }
-          : { width: { ideal: this.width }, height: { ideal: this.height } },
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      const video = document.createElement('video');
-      video.srcObject = stream;
-      video.muted = true;
-      video.playsInline = true;
-
-      return new Promise((resolve) => {
-        const cleanup = () => {
-          video.removeEventListener('loadeddata', onLoadedData);
-          video.removeEventListener('error', onError);
-        };
-
-        const onLoadedData = () => {
-          cleanup();
-          this.input.setVideo(video, opts);
-          this.run();
-          if (this._autoLoop) this.start();
-          resolve(video);
-        };
-
-        const onError = (e) => {
-          cleanup();
-          console.warn('DCTLive.initCam: video error:', e);
-          resolve(video);
-        };
-
-        video.addEventListener('loadeddata', onLoadedData, { once: true });
-        video.addEventListener('error', onError, { once: true });
-        video.play().catch((e) => {
-          console.warn('DCTLive.initCam: play() blocked:', e);
-        });
-      });
-    } catch (err) {
-      const msg = `Camera error: ${err.name || 'unknown'} - ${err.message || err}`;
-      console.error('DCTLive.initCam:', msg);
-      throw err;
-    }
-  }
-
-  // ---- Uniform setters ----
-
-  setUniform(name, value) { this._config.setUniform(name, value); }
-  setUniforms(obj)        { this._config.setUniforms(obj); }
-
-  // ---- Wave function ----
-
-  /**
-   * Replace the wave function used during inverse DCT reconstruction.
-   * Triggers a recompile of the inverse shader programs.
-   * @param {string} glslBody - GLSL function body, e.g. "return cos(angle);"
-   *   Available variables: `angle` (float), `time` (float, ms), `wi` (float, waveInput uniform)
-   */
-  setWaveFunction(glslBody) { this._pipeline.setWaveFunction(glslBody); }
-
-  /** Reset the wave function to the default cosine. */
-  resetWaveFunction() { this._pipeline.resetWaveFunction(); }
+  // ---- Resolution & display ----
 
   /**
    * Set the WebGL processing resolution.
@@ -359,6 +94,90 @@ export default class DCTLive {
    */
   resizeCanvas(width, height) { this._display.setSize(width, height); }
 
+  /** Show the canvas. */
+  show() { this._display.show(); }
+
+  /** Hide the canvas. */
+  hide() { this._display.hide(); }
+
+  /**
+   * Append the canvas into a DOM parent.
+   * @param {HTMLElement} parent
+   */
+  mount(parent = document.body) { this._display.mount(parent); }
+
+  /** Remove the canvas from the DOM. */
+  unmount() { this._display.unmount(); }
+
+  // ---- Source loading ----
+
+  /**
+   * Load an image from a URL or set an HTMLImageElement as input.
+   * @param {string|HTMLImageElement} source - URL string or image element
+   * @param {Object} [opts] - { fit, minFilter, magFilter, wrap }
+   * @returns {Promise<void>}
+   */
+  async initImage(source, opts = {}) {
+    try {
+      if (typeof source === 'string') await this.input.loadImage(source, opts);
+      else if (source instanceof HTMLImageElement) this.input.setImage(source, opts);
+      else throw new Error('source must be a URL string or HTMLImageElement');
+      this._afterLoad();
+    } catch (err) { console.error('DCTLive.initImage failed:', err); }
+  }
+
+  /**
+   * Load a video from a URL or set an HTMLVideoElement as dynamic input.
+   * @param {string|HTMLVideoElement} source - URL string or video element
+   * @param {Object} [opts] - { fit, minFilter, magFilter, wrap }
+   * @returns {Promise<void>}
+   */
+  async initVideo(source, opts = {}) {
+    try {
+      if (typeof source === 'string') await this.input.loadVideo(source, opts);
+      else if (source instanceof HTMLVideoElement) this.input.setVideo(source, opts);
+      else throw new Error('source must be a URL string or HTMLVideoElement');
+      this._afterLoad();
+    } catch (err) { console.error('DCTLive.initVideo failed:', err); }
+  }
+
+  /**
+   * Set another canvas as dynamic input.
+   * Accepts HTMLCanvasElement, a CanvasRenderingContext2D, or Hydra-style wrapper objects.
+   * @param {HTMLCanvasElement|CanvasRenderingContext2D|Object} canvas
+   * @param {Object} [opts]
+   */
+  async initCanvas(canvas, opts = {}) {
+    try {
+      this.input.setCanvas(canvas, opts);
+      this._afterLoad();
+    } catch (err) { console.error('DCTLive.initCanvas failed:', err); }
+  }
+
+  /**
+   * Initialize camera input from device camera(s).
+   * @param {number|string} [selector=0] - Camera index (number) or label (string)
+   * @param {Object} [opts] - { constraints }
+   * @returns {Promise<HTMLVideoElement>}
+   */
+  async initCam(selector = 0, opts = {}) {
+    try {
+      const video = await this.input.initCam(selector, opts);
+      this._afterLoad();
+      return video;
+    } catch (err) {
+      console.error('DCTLive.initCam:', `Camera error: ${err.name || 'unknown'} - ${err.message || err}`);
+      throw err;
+    }
+  }
+
+  _afterLoad() {
+    this.run();
+    if (this._autoLoop) this.start();
+  }
+
+  // ---- DCT pass control ----
+
   /**
    * Control which forward DCT passes run (spatial → frequency domain).
    * Disabling both lets you feed any image into the IDCT as raw coefficient data.
@@ -383,7 +202,73 @@ export default class DCTLive {
     this.idctVertical = vertical !== undefined ? !!vertical : this.idctHorizontal;
   }
 
-  // ---- Rendering ----
+  // ---- Wave function ----
+
+  /**
+   * Replace the wave function used during inverse DCT reconstruction.
+   * Triggers a recompile of the inverse shader programs.
+   * @param {string} glslBody - GLSL function body, e.g. "return cos(angle);"
+   *   Available variables: `angle` (float), `time` (float, ms), `wi` (float, waveInput uniform)
+   */
+  setWaveFunction(glslBody) { this._pipeline.setWaveFunction(glslBody); }
+
+  /** Reset the wave function to the default cosine. */
+  resetWaveFunction() { this._pipeline.resetWaveFunction(); }
+
+  // ---- Uniforms ----
+
+  setUniform(name, value) { this._config.setUniform(name, value); }
+  setUniforms(obj)        { this._config.setUniforms(obj); }
+
+  // Uniform shorthands — quantize values (qY, qC, etc.) are squared before reaching the shader
+  // (user input 0–1 maps to a quadratic curve for perceptual control).
+  get qY()        { return this._config.uniforms.quantizeY; }
+  set qY(v)       { this._config.uniforms.quantizeY = v; }
+  get qYf()       { return this._config.uniforms.quantizeYf; }
+  set qYf(v)      { this._config.uniforms.quantizeYf = v; }
+  get qC()        { return this._config.uniforms.quantizeC; }
+  set qC(v)       { this._config.uniforms.quantizeC = v; }
+  get qCf()       { return this._config.uniforms.quantizeCf; }
+  set qCf(v)      { this._config.uniforms.quantizeCf = v; }
+  get qA()        { return this._config.uniforms.quantizeA; }
+  set qA(v)       { this._config.uniforms.quantizeA = v; }
+  get qAf()       { return this._config.uniforms.quantizeAf; }
+  set qAf(v)      { this._config.uniforms.quantizeAf = v; }
+  get hfreq()     { return this._config.uniforms.highFreqMultiplier; }
+  set hfreq(v)    { this._config.uniforms.highFreqMultiplier = v; }
+  get blockSize() { return this._config.uniforms.blockSize; }
+  set blockSize(v){ this._config.uniforms.blockSize = v; }
+  get lpf()       { return this._config.uniforms.lpf; }
+  set lpf(v)      { this._config.uniforms.lpf = v; }
+  get waveInput() { return this._config.uniforms.waveInput; }
+  set waveInput(v){ this._config.uniforms.waveInput = v; }
+
+  // ---- Global state ----
+
+  get uniforms()   { return this._config.uniforms; }
+  get precision()  { return this._precision; }
+
+  get fps()        { return this._config.fps; }
+  set fps(value)   { this._config.fps = value; }
+
+  get flipY()      { return this._display.flipY; }
+  set flipY(value) { this._display.flipY = value; this.input.flipY = value; }
+
+  // yOnly swaps shader programs in the pipeline in addition to storing the value
+  get yOnly()     { return this._config.uniforms.yOnly; }
+  set yOnly(v)    { this._config.uniforms.yOnly = v; this._pipeline.setYOnly(v); }
+
+  /**
+   * Reset to initial configuration: all uniforms to defaults, wave function to cosine, all passes enabled.
+   */
+  reset() {
+    this._config.reset();
+    this.yOnly = false;
+    this.resetWaveFunction();
+    this.dctHorizontal = this.dctVertical = this.idctHorizontal = this.idctVertical = true;
+  }
+
+  // ---- Render loop ----
 
   /** Run the DCT/IDCT pipeline once. */
   run() {
@@ -404,8 +289,6 @@ export default class DCTLive {
     });
   }
 
-  // ---- Loop control ----
-
   /** Start the render loop. */
   start() {
     if (this._looping) return;
@@ -415,12 +298,12 @@ export default class DCTLive {
       if (!this._looping) return;
       const frameInterval = this._config.frameInterval;
       if (this._lastFrameTime === null) {
-        this.run();
+        try { this.run(); } catch (e) { console.error(e); }
         this._lastFrameTime = timestamp;
       } else {
         const delta = timestamp - this._lastFrameTime;
         if (frameInterval <= 0 || delta >= frameInterval) {
-          this.run();
+          try { this.run(); } catch (e) { console.error(e); }
           // Drift-correct: carry over any excess time so frame rate stays accurate
           this._lastFrameTime = frameInterval > 0
             ? timestamp - (delta % frameInterval)
@@ -441,44 +324,7 @@ export default class DCTLive {
     }
   }
 
-  // ---- Display ----
-
-  /** Show the canvas. */
-  show() { this._display.show(); }
-
-  /** Hide the canvas. */
-  hide() { this._display.hide(); }
-
-  /**
-   * Append the canvas into a DOM parent.
-   * @param {HTMLElement} parent
-   */
-  mount(parent = document.body) { this._display.mount(parent); }
-
-  /** Remove the canvas from the DOM. */
-  unmount() { this._display.unmount(); }
-
-  /**
-   * Reset to initial configuration: all uniforms to defaults, wave function to cosine, all passes enabled.
-   */
-  reset() {
-    this._config.uniforms.blockSize = 8;
-    this._config.uniforms.lpf = 128;
-    this._config.uniforms.highFreqMultiplier = 0;
-    this._config.uniforms.quantizeY = 0;
-    this._config.uniforms.quantizeYf = 0;
-    this._config.uniforms.quantizeC = 0;
-    this._config.uniforms.quantizeCf = 0;
-    this._config.uniforms.quantizeA = 0;
-    this._config.uniforms.quantizeAf = 0;
-    this._config.uniforms.waveInput = 0;
-    this.yOnly = false;
-    this.resetWaveFunction();
-    this.dctHorizontal  = true;
-    this.dctVertical    = true;
-    this.idctHorizontal = true;
-    this.idctVertical   = true;
-  }
+  // ---- Lifecycle ----
 
   /** Clean up WebGL resources. */
   destroy() {

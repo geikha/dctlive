@@ -68,10 +68,18 @@ export default class RenderPipeline {
 
   setWaveFunction(glslBody) {
     const normalized = glslBody.trim().replace(/\s+/g, ' ');
+    const previous = this._waveBody;
     this._waveBody = normalized;
     this.shaderProvider.waveBody = normalized;
     this._deleteInversePrograms();
-    this._buildInversePrograms();
+    try {
+      this._buildInversePrograms();
+    } catch (e) {
+      this._waveBody = previous;
+      this.shaderProvider.waveBody = previous;
+      this._buildInversePrograms();
+      throw e;
+    }
   }
 
   resetWaveFunction() {

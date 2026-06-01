@@ -134,9 +134,68 @@ export default class InputSource {
     this._setSource(video, true);
   }
 
+  loadVideo(url, opts = {}) {
+    if (opts) this.setOptions(opts);
+    return new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      video.src = url;
+      video.crossOrigin = 'anonymous';
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      const cleanup = () => {
+        video.removeEventListener('loadeddata', onLoaded);
+        video.removeEventListener('error', onError);
+      };
+      const onLoaded = () => {
+        cleanup();
+        this._setSource(video, true);
+        video.play().catch(() => {});
+        resolve(video);
+      };
+      const onError = (e) => {
+        cleanup();
+        reject(new Error(`Failed to load video: ${url} — ${e.message || 'unknown error'}`));
+      };
+      video.addEventListener('loadeddata', onLoaded);
+      video.addEventListener('error', onError);
+    });
+  }
+
   setCanvas(canvas, opts = {}) {
     if (opts) this.setOptions(opts);
-    this._setSource(canvas, true);
+    this._setSource(_resolveCanvas(canvas), true);
+  }
+
+  async initCam(selector = 0, opts = {}) {
+    if (opts) this.setOptions(opts);
+    const cameras = await _enumerateCameras();
+    let device;
+    if (typeof selector === 'number') {
+      device = cameras[selector];
+    } else if (typeof selector === 'string') {
+      device = cameras.find(d => d.label === selector)
+        || cameras.find(d => d.label.toLowerCase().includes(selector.toLowerCase()));
+    }
+    const constraints = opts.constraints || {
+      video: device
+        ? { deviceId: { exact: device.deviceId }, width: { ideal: this.targetWidth }, height: { ideal: this.targetHeight } }
+        : { width: { ideal: this.targetWidth }, height: { ideal: this.targetHeight } },
+    };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    return new Promise((resolve) => {
+      const onLoaded = () => {
+        video.removeEventListener('loadeddata', onLoaded);
+        this._setSource(video, true);
+        resolve(video);
+      };
+      video.addEventListener('loadeddata', onLoaded, { once: true });
+      video.play().catch(() => {});
+    });
   }
 
   // ---- Frame update ----
@@ -260,4 +319,27 @@ export default class InputSource {
     }
     this._source = null;
   }
+}
+
+function _resolveCanvas(input) {
+  if (input instanceof HTMLCanvasElement) return input;
+  if (input instanceof CanvasRenderingContext2D) return input.canvas;
+  if (input?.src instanceof HTMLCanvasElement) return input.src;
+  if (input?.src instanceof CanvasRenderingContext2D) return input.src.canvas;
+  if (input?.canvas instanceof HTMLCanvasElement) return input.canvas;
+  if (input?.canvas instanceof CanvasRenderingContext2D) return input.canvas.canvas;
+  if (typeof input?.getContext === 'function') return input;
+  throw new Error('setCanvas: expected HTMLCanvasElement, CanvasRenderingContext2D, or a Hydra-style wrapper');
+}
+
+async function _enumerateCameras() {
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  let cameras = devices.filter(d => d.kind === 'videoinput');
+  if (!cameras.some(d => d.deviceId)) {
+    const temp = await navigator.mediaDevices.getUserMedia({ video: true });
+    temp.getTracks().forEach(t => t.stop());
+    devices = await navigator.mediaDevices.enumerateDevices();
+    cameras = devices.filter(d => d.kind === 'videoinput');
+  }
+  return cameras;
 }

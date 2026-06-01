@@ -100,6 +100,11 @@ export default class ShaderConfig {
       u.quantizeA !== 0 || u.quantizeAf !== 0;
   }
 
+  /** Reset all uniforms to their default values. */
+  reset() {
+    this.uniforms = { ...DEFAULT_UNIFORMS };
+  }
+
   /** Set frame rate. 0 = unlimited. */
   setFPS(fps) {
     this._fps = Math.max(0, Number(fps) || 0);
